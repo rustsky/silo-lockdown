@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/silo_core", "crates/silo_tui"]
+members = ["crates/silo_core", "crates/silo_tui", "crates/silo_gfx"]
 
 [workspace.package]
 edition = "2024"

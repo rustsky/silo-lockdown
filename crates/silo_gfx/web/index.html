@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Silo: Lockdown</title>
+  <style>
+    html, body, canvas { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden;
+      background: #08080a; touch-action: none; }
+    canvas:focus { outline: none; }
+  </style>
+</head>
+<body>
+  <canvas id="glcanvas" tabindex="1"></canvas>
+  <!-- miniquad/macroquad JS loader, matching macroquad 0.4 -->
+  <script src="https://not-fl3.github.io/miniquad-samples/mq_js_bundle.js"></script>
+  <script>load("silo_gfx.wasm");</script>
+</body>
+</html>

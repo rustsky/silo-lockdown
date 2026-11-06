@@ -1,0 +1,18 @@
+[package]
+name = "silo_gfx"
+description = "Graphical frontend for Silo: Lockdown (desktop, web, Android, iOS)"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+macroquad = "0.4"
+silo_core = { path = "../silo_core" }
+
+# Android build via cargo-quad-apk (see README).
+[package.metadata.android]
+package_name = "com.silolockdown.game"
+label = "Silo: Lockdown"
+fullscreen = true
+
+[package.metadata.android.activity_attributes]
+"android:screenOrientation" = "userPortrait"
