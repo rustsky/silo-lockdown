@@ -6,8 +6,43 @@ use crate::ui::*;
 use macroquad::prelude::*;
 use silo_core as sc;
 use silo_core::bot::Bot;
-use silo_core::stats::{MAX_TOWER_LEVEL, MAX_WAVES, START_SEALS};
+use silo_core::map::{SECTIONS, section_view_top};
+use silo_core::stats::{BARRIER_COST, BARRIER_HP, MAX_TOWER_LEVEL, MAX_WAVES, START_SEALS};
 use silo_core::{Event, Game, Phase, TICK, TowerKind};
+
+/// A press that started in the field: a short press is a tap, a vertical drag rolls the view.
+struct Drag {
+    start: Vec2,
+    scroll0: f32,
+    moved: bool,
+}
+
+const SECTION_COUNT: usize = SECTIONS.len();
+
+fn view_scroll(view: usize) -> f32 {
+    section_view_top(view) as f32 * TILE
+}
+
+fn max_scroll() -> f32 {
+    view_scroll(SECTION_COUNT - 1)
+}
+
+/// Overview column on the right wall: up arrow, minimap, down arrow (screen pixels).
+fn nav_rects() -> (Rect, Rect, Rect) {
+    let x = W - TILE + 5.0;
+    let w = TILE - 10.0;
+    let up = Rect::new(x, HUD_H + 6.0, w, 40.0);
+    let down = Rect::new(x, PANEL_Y - 46.0, w, 40.0);
+    let map = Rect::new(x, up.y + up.h + 6.0, w, down.y - up.y - up.h - 12.0);
+    (up, map, down)
+}
+
+/// What a tap on an empty tile builds.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tool {
+    Tower(TowerKind),
+    Barrier,
+}
 
 #[derive(PartialEq, Eq)]
 enum Screen {
@@ -20,14 +55,26 @@ pub struct App {
     bot: Bot,
     autopilot: bool,
     screen: Screen,
-    build: Option<TowerKind>,
+    build: Option<Tool>,
     selected: Option<sc::Id>,
+    selected_barrier: Option<sc::Id>,
     speed: u32,
     paused: bool,
     acc: f32,
     time: f32,
     fx: Fx,
+    /// Section the view is rolling to (0 = Up Top .. 2 = Down Deep).
+    view: usize,
+    /// Current vertical scroll of the field in world pixels (animates toward `view`).
+    scroll: f32,
+    /// Section name flashed at the top of the field after rolling, with time left.
+    view_label: f32,
+    drag: Option<Drag>,
+    wheel: f32,
+    wheel_cooldown: f32,
     banner: Option<(String, String, f32)>,
+    /// Wave whose first power cut was announced (later cuts that wave stay quiet).
+    power_announced: u32,
     decor: Decor,
     /// Screenshot mode (SILO_SHOT=path.png): autoplay and capture after N frames.
     shot: Option<(String, u32)>,
@@ -59,12 +106,20 @@ impl App {
             screen: Screen::Title,
             build: None,
             selected: None,
+            selected_barrier: None,
             speed: 2,
             paused: false,
             acc: 0.0,
             time: 0.0,
             fx: Fx::default(),
+            view: 0,
+            scroll: 0.0,
+            view_label: 0.0,
+            drag: None,
+            wheel: 0.0,
+            wheel_cooldown: 0.0,
             banner: None,
+            power_announced: 0,
             decor,
             shot,
             frame: 0,
@@ -74,6 +129,29 @@ impl App {
             app.start();
             app.autopilot = true;
             app.speed = 4;
+            // SILO_SHOT_SKIP=N: let the AI play N waves instantly before the capture starts.
+            let skip: u32 = std::env::var("SILO_SHOT_SKIP")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            while app.game.wave() < skip && !app.game.is_over() {
+                app.bot.take_turn(&mut app.game);
+                app.game.run_wave(30 * 60 * 10);
+                app.game.drain_events();
+            }
+            // SILO_SHOT_BARRIERS=1: barricade a few stair tiles in Mids for the capture.
+            if std::env::var("SILO_SHOT_BARRIERS").is_ok() {
+                for (c, r) in [(4, 16), (7, 18), (4, 20), (7, 22)] {
+                    let _ = app.game.place_barrier(c, r);
+                }
+            }
+            let view = std::env::var("SILO_SHOT_VIEW")
+                .ok()
+                .and_then(|v| v.parse().ok());
+            if let Some(v) = view {
+                app.view = usize::min(v, SECTION_COUNT - 1);
+                app.scroll = view_scroll(app.view);
+            }
         }
         app
     }
@@ -87,16 +165,23 @@ impl App {
         self.bot = Bot::balanced(self.game.map());
         self.screen = Screen::Playing;
         self.autopilot = false;
-        self.build = Some(TowerKind::Deputy);
+        self.build = Some(Tool::Tower(TowerKind::Deputy));
         self.selected = None;
+        self.selected_barrier = None;
         self.speed = 1;
         self.paused = false;
         self.acc = 0.0;
         self.fx.clear();
+        // Start where the uprising starts.
+        self.view = SECTION_COUNT - 1;
+        self.drag = None;
+        self.view_label = 2.0;
         self.banner = Some((
             "YOU ARE IT".into(),
-            "Mechanical is rising. Build on the levels and catwalks, then send the wave.".into(),
-            5.0,
+            "Mechanical is rising. Build on the levels and catwalks, then send the wave. \
+             Drag, scroll or use the arrows to roll between Up Top, Mids and Down Deep."
+                .into(),
+            6.0,
         ));
     }
 
@@ -130,9 +215,20 @@ impl App {
             consumed: false,
         };
 
-        self.keys();
+        // Screenshot runs are hands-off: stray input must not move the view.
+        if self.shot.is_none() {
+            self.keys();
+        }
         self.simulate(dt);
         self.fx.update(dt);
+        self.update_scroll(dt);
+        // The world camera is the screen camera rolled down by the current scroll.
+        let world_cam = Camera2D {
+            target: cam.target + vec2(0.0, self.scroll),
+            zoom: cam.zoom,
+            ..Default::default()
+        };
+        let world_pointer = pointer + vec2(0.0, self.scroll);
         if let Some((_, _, t)) = &mut self.banner {
             *t -= dt;
             if *t <= 0.0 {
@@ -141,11 +237,17 @@ impl App {
         }
 
         clear_background(rgb(8, 8, 10));
-        set_camera(&cam);
+        set_camera(&world_cam);
         render::world(&self.game, &self.decor, self.time, self.fx.red_flash);
-        self.field_overlays(&ui);
+        self.field_overlays(&ui, world_pointer);
         self.fx.draw();
+        render::darkness(&self.game, self.time);
+        set_camera(&cam);
+        // The world is taller than the field: cover what spills over the HUD and panel.
+        draw_rectangle(0.0, -vh, W, vh + HUD_H, rgb(8, 8, 10));
+        draw_rectangle(0.0, PANEL_Y, W, vh + PANEL_H, rgb(8, 8, 10));
         vignette();
+        self.draw_view_label();
         if self.fx.red_flash > 0.0 {
             draw_rectangle(
                 0.0,
@@ -163,10 +265,11 @@ impl App {
             Screen::Playing => {
                 self.hud(&mut ui);
                 self.panel(&mut ui);
+                self.navigator(&mut ui);
                 if self.game.is_over() {
                     self.game_over(&mut ui);
                 }
-                self.field_tap(&mut ui);
+                self.field_input(&mut ui);
             }
         }
         // Mask anything drawn outside the canvas (letterbox).
@@ -199,6 +302,14 @@ impl App {
     // ------------------------------------------------------------ simulation
 
     fn simulate(&mut self, dt: f32) {
+        // SILO_SHOT_NOAI=1: screenshot runs leave the silo undefended (waves still roll in).
+        if self.shot.is_some()
+            && std::env::var("SILO_SHOT_NOAI").is_ok()
+            && self.game.phase() == Phase::Building
+        {
+            self.autopilot = false;
+            let _ = self.game.send_wave();
+        }
         let auto = self.autopilot || self.screen == Screen::Title;
         if self.screen == Screen::Title && self.game.is_over() {
             self.game = Game::new(seed()); // attract mode loops forever
@@ -226,6 +337,12 @@ impl App {
             .is_some_and(|id| self.game.tower(id).is_none())
         {
             self.selected = None;
+        }
+        if self
+            .selected_barrier
+            .is_some_and(|id| self.game.barrier(id).is_none())
+        {
+            self.selected_barrier = None;
         }
         for ev in self.game.drain_events() {
             self.on_event(ev);
@@ -296,6 +413,90 @@ impl App {
                 to,
                 ..
             } => self.fx.add(px(from), 0.18, Kind::Tracer { to: px(to) }),
+            Event::EnemyShot { from, to, .. } => {
+                self.fx.add(px(from), 0.15, Kind::Tracer { to: px(to) })
+            }
+            Event::TowerDestroyed { kind, pos, .. } => {
+                let p = px(pos);
+                self.fx.shake = self.fx.shake.max(0.2);
+                self.fx.add(p, 0.6, Kind::Puff);
+                self.fx.add(
+                    p,
+                    0.5,
+                    Kind::Ring {
+                        max_r: 40.0,
+                        color: rgb(255, 150, 60),
+                    },
+                );
+                self.fx.add(
+                    p - vec2(0.0, 24.0),
+                    1.4,
+                    Kind::Text {
+                        text: format!("{} DESTROYED", kind.name().to_uppercase()),
+                        color: rgb(255, 120, 80),
+                    },
+                );
+            }
+            Event::ItCollapsed { seconds } if playing => {
+                self.fx.shake = 0.5;
+                self.banner = Some((
+                    "IT HAS FALLEN".into(),
+                    format!("The server room is down. No cameras below Up Top for {seconds:.0}s."),
+                    3.5,
+                ));
+            }
+            Event::ItRestored if playing && self.game.phase() == Phase::Wave => {
+                self.banner = Some(("IT BACK ONLINE".into(), "Cameras restored.".into(), 1.8));
+            }
+            Event::PowerCut { .. } if playing && self.power_announced != self.game.wave() => {
+                self.power_announced = self.game.wave();
+                self.banner = Some((
+                    "MAIN POWER CUT".into(),
+                    "Mechanical is killing the lights. A whole section of the silo goes dark."
+                        .into(),
+                    3.0,
+                ));
+            }
+            Event::SupplyJoined if playing => {
+                self.fx.shake = 0.3;
+                self.banner = Some((
+                    "SUPPLY JOINS THE UPRISING".into(),
+                    "Rebels passing the Supply depot now get guns and tools. \
+                     Stop them below Supply, or barricade the stair above it."
+                        .into(),
+                    5.0,
+                ));
+            }
+            Event::Equipped {
+                pos, gun, tools, ..
+            } => {
+                let label = match (gun, tools) {
+                    (true, true) => "+GUN +TOOLS",
+                    (true, false) => "+GUN",
+                    _ => "+TOOLS",
+                };
+                self.fx.add(
+                    px(pos) - vec2(0.0, 30.0),
+                    1.0,
+                    Kind::Text {
+                        text: label.into(),
+                        color: rgb(240, 150, 80),
+                    },
+                );
+            }
+            Event::BarrierBroken { pos, .. } => {
+                let p = px(pos);
+                self.fx.shake = self.fx.shake.max(0.2);
+                self.fx.add(p, 0.6, Kind::Puff);
+                self.fx.add(
+                    p - vec2(0.0, 26.0),
+                    1.2,
+                    Kind::Text {
+                        text: "BARRIER BROKEN".into(),
+                        color: rgb(255, 160, 90),
+                    },
+                );
+            }
             Event::Lost => self.fx.shake = 0.8,
             _ => {}
         }
@@ -327,6 +528,10 @@ impl App {
             self.report(r);
             self.selected = None;
         }
+        if let Some(id) = self.selected_barrier.take() {
+            let r = self.game.remove_barrier(id);
+            self.report(r);
+        }
     }
 
     fn keys(&mut self) {
@@ -339,12 +544,16 @@ impl App {
         let kinds = [KeyCode::Key1, KeyCode::Key2, KeyCode::Key3, KeyCode::Key4];
         for (i, k) in kinds.iter().enumerate() {
             if is_key_pressed(*k) {
-                self.pick(TowerKind::ALL[i]);
+                self.pick(Tool::Tower(TowerKind::ALL[i]));
             }
+        }
+        if is_key_pressed(KeyCode::Key5) || is_key_pressed(KeyCode::B) {
+            self.pick(Tool::Barrier);
         }
         if is_key_pressed(KeyCode::Escape) {
             self.build = None;
             self.selected = None;
+            self.selected_barrier = None;
         }
         if is_key_pressed(KeyCode::N) || is_key_pressed(KeyCode::Space) {
             self.send_wave();
@@ -367,10 +576,149 @@ impl App {
         if is_key_pressed(KeyCode::R) && self.game.is_over() {
             self.start();
         }
+        for k in [KeyCode::Up, KeyCode::W, KeyCode::PageUp] {
+            if is_key_pressed(k) {
+                self.roll(-1);
+            }
+        }
+        for k in [KeyCode::Down, KeyCode::S, KeyCode::PageDown] {
+            if is_key_pressed(k) {
+                self.roll(1);
+            }
+        }
+        for (i, k) in [KeyCode::Home, KeyCode::End].iter().enumerate() {
+            if is_key_pressed(*k) {
+                self.set_view(i * (SECTION_COUNT - 1));
+            }
+        }
     }
 
-    fn pick(&mut self, k: TowerKind) {
+    // ------------------------------------------------------------ view rolling
+
+    fn set_view(&mut self, v: usize) {
+        let v = v.min(SECTION_COUNT - 1);
+        if v != self.view {
+            self.view_label = 1.6;
+        }
+        self.view = v;
+    }
+
+    fn roll(&mut self, dir: i32) {
+        let v = (self.view as i32 + dir).clamp(0, SECTION_COUNT as i32 - 1);
+        self.set_view(v as usize);
+    }
+
+    fn update_scroll(&mut self, dt: f32) {
+        self.view_label = (self.view_label - dt).max(0.0);
+        if self.screen == Screen::Title {
+            // Attract mode: drift slowly down the silo and back up.
+            self.scroll = (1.0 - (self.time * 0.12).cos()) / 2.0 * max_scroll();
+            return;
+        }
+        // Mouse wheel / trackpad: one section per gesture.
+        self.wheel_cooldown = (self.wheel_cooldown - dt).max(0.0);
+        let wy = if self.shot.is_none() {
+            mouse_wheel().1
+        } else {
+            0.0
+        };
+        if self.wheel_cooldown > 0.0 {
+            self.wheel = 0.0;
+        } else {
+            self.wheel += wy;
+            if self.wheel.abs() >= 1.0 {
+                self.roll(if self.wheel > 0.0 { -1 } else { 1 });
+                self.wheel = 0.0;
+                self.wheel_cooldown = 0.35;
+            }
+        }
+        if self.drag.as_ref().is_some_and(|d| d.moved) {
+            return; // the finger owns the scroll
+        }
+        let target = view_scroll(self.view);
+        self.scroll += (target - self.scroll) * (1.0 - (-12.0 * dt).exp());
+        if (target - self.scroll).abs() < 0.5 {
+            self.scroll = target;
+        }
+    }
+
+    /// Up/down arrows and the overview map on the right wall.
+    fn navigator(&mut self, ui: &mut Ui) {
+        let (up, map, down) = nav_rects();
+        // Rebels out of sight above / below the field.
+        let (top, bottom) = (self.scroll, self.scroll + FIELD_H);
+        let wy = |e: &sc::Enemy| px(e.pos).y - HUD_H;
+        let seen = || {
+            self.game
+                .enemies()
+                .iter()
+                .filter(|e| self.game.is_visible(e.pos))
+        };
+        let above = seen().filter(|e| wy(e) < top).count();
+        let below = seen().filter(|e| wy(e) > bottom).count();
+        arrow(up, true, self.view > 0, ui.hovered(up), above, self.time);
+        arrow(
+            down,
+            false,
+            self.view + 1 < SECTION_COUNT,
+            ui.hovered(down),
+            below,
+            self.time,
+        );
+        minimap(&self.game, map, self.scroll, self.time);
+        if ui.hit(up) {
+            self.roll(-1);
+        }
+        if ui.hit(down) {
+            self.roll(1);
+        }
+        if let Some(p) = ui.tap
+            && ui.hit(map)
+        {
+            let row = ((p.y - map.y) / map.h * sc::map::ROWS as f32) as i32;
+            self.set_view(sc::map::section_of_row(row));
+        }
+    }
+
+    fn draw_view_label(&self) {
+        if self.view_label <= 0.0 || self.screen != Screen::Playing {
+            return;
+        }
+        let a = (self.view_label / 0.4).min(1.0);
+        let (name, first, last) = SECTIONS[self.view];
+        let label = format!(
+            "{name}   LEVELS {}-{}",
+            sc::map::level_of_row(first),
+            sc::map::level_of_row(last) + 3
+        );
+        let w = measure(&label, 20.0) + 36.0;
+        let y = HUD_H + 14.0;
+        draw_rectangle(
+            W / 2.0 - w / 2.0,
+            y,
+            w,
+            34.0,
+            rgba(10, 12, 16, (a * 210.0) as u8),
+        );
+        draw_rectangle(
+            W / 2.0 - w / 2.0,
+            y + 32.0,
+            w,
+            2.0,
+            rgba(220, 184, 92, (a * 255.0) as u8),
+        );
+        text_centered(
+            &label,
+            W / 2.0,
+            y + 24.0,
+            20.0,
+            rgba(240, 214, 130, (a * 255.0) as u8),
+        );
+    }
+
+    fn pick(&mut self, k: Tool) {
         self.selected = None;
+        self.selected_barrier = None;
         self.build = if self.build == Some(k) { None } else { Some(k) };
     }
 
@@ -382,28 +730,88 @@ impl App {
         };
     }
 
-    fn field_tap(&mut self, ui: &mut Ui) {
-        let Some(p) = ui.tap.filter(|_| !ui.consumed) else {
+    /// Presses in the field: drag vertically to roll the view, release without dragging to tap.
+    fn field_input(&mut self, ui: &mut Ui) {
+        if let Some(p) = ui.tap.filter(|_| !ui.consumed)
+            && p.y >= HUD_H
+            && p.y < PANEL_Y
+        {
+            self.drag = Some(Drag {
+                start: p,
+                scroll0: self.scroll,
+                moved: false,
+            });
+        }
+        let Some(drag) = &mut self.drag else { return };
+        let dy = ui.pointer.y - drag.start.y;
+        if dy.abs() > 14.0 {
+            drag.moved = true;
+        }
+        if drag.moved {
+            self.scroll = (drag.scroll0 - dy).clamp(0.0, max_scroll());
+        }
+        if is_mouse_button_down(MouseButton::Left) {
             return;
-        };
-        if p.y < HUD_H || p.y >= PANEL_Y || self.game.is_over() {
+        }
+        let drag = self.drag.take().unwrap();
+        if !drag.moved {
+            self.field_tap(drag.start + vec2(0.0, self.scroll));
+            return;
+        }
+        // Snap: a decent flick rolls one section that way; otherwise go to the nearest.
+        let from = (0..SECTION_COUNT)
+            .min_by(|&a, &b| {
+                (view_scroll(a) - drag.scroll0)
+                    .abs()
+                    .total_cmp(&(view_scroll(b) - drag.scroll0).abs())
+            })
+            .unwrap();
+        let nearest = (0..SECTION_COUNT)
+            .min_by(|&a, &b| {
+                (view_scroll(a) - self.scroll)
+                    .abs()
+                    .total_cmp(&(view_scroll(b) - self.scroll).abs())
+            })
+            .unwrap();
+        self.view = from;
+        if nearest != from {
+            self.set_view(nearest);
+        } else if dy < -70.0 {
+            self.roll(1);
+        } else if dy > 70.0 {
+            self.roll(-1);
+        }
+    }
+
+    /// A tap on world pixel `p`.
+    fn field_tap(&mut self, p: Vec2) {
+        if self.game.is_over() {
             return;
         }
         let Some((c, r)) = tile_at(p) else { return };
-        if let Some(t) = self.game.tower_at(c, r) {
-            self.selected = Some(t.id);
+        if let Some(b) = self.game.barrier_at(c, r) {
+            self.selected_barrier = Some(b.id);
+            self.selected = None;
             self.build = None;
-        } else if let Some(k) = self.build {
+        } else if let Some(t) = self.game.tower_at(c, r) {
+            self.selected = Some(t.id);
+            self.selected_barrier = None;
+            self.build = None;
+        } else if let Some(Tool::Tower(k)) = self.build {
             let res = self.game.place(k, c, r);
+            self.report(res);
+        } else if self.build == Some(Tool::Barrier) {
+            let res = self.game.place_barrier(c, r);
             self.report(res);
         } else {
             self.selected = None;
+            self.selected_barrier = None;
         }
     }
 
     // ------------------------------------------------------------ drawing
 
-    fn field_overlays(&self, ui: &Ui) {
+    fn field_overlays(&self, ui: &Ui, world_pointer: Vec2) {
         if self.screen != Screen::Playing {
             return;
         }
@@ -412,10 +820,71 @@ impl App {
             range_circle(c, t.stats().range * TILE, true);
             draw_circle_lines(c.x, c.y, 25.0, 2.5, rgb(255, 255, 255));
         }
+        if let Some(b) = self.selected_barrier.and_then(|id| self.game.barrier(id)) {
+            let c = px(b.pos);
+            draw_rectangle_lines(c.x - 24.0, c.y - 30.0, 48.0, 40.0, 2.5, WHITE);
+        }
+        let (up, map, down) = nav_rects();
+        let over_nav = [up, map, down].iter().any(|r| r.contains(ui.pointer));
+        let hovering =
+            ui.pointer.y >= HUD_H && ui.pointer.y < PANEL_Y && !over_nav && self.drag.is_none();
+        if self.build == Some(Tool::Barrier) {
+            // Show where barriers may go: the stair above the Supply depot.
+            let y = HUD_H + sc::map::SUPPLY_ROOM[0].1 as f32 * TILE;
+            let mut x = TILE;
+            while x < W - TILE {
+                draw_line(x, y, x + 14.0, y, 3.0, rgba(255, 120, 80, 200));
+                x += 24.0;
+            }
+            text(
+                "NO BARRIERS BELOW SUPPLY",
+                TILE + 8.0,
+                y + 18.0,
+                13.0,
+                rgb(255, 150, 110),
+            );
+            text(
+                "BARRIERS ALLOWED ABOVE",
+                TILE + 8.0,
+                y - 8.0,
+                13.0,
+                rgb(140, 230, 150),
+            );
+            if let Some((c, r)) = tile_at(world_pointer).filter(|_| hovering) {
+                let ok = self.game.can_place_barrier(c, r).is_ok();
+                match self.game.map().barrier_dist(c, r) {
+                    Some(d) => {
+                        let p = px(self.game.map().pos_at(d));
+                        barrier_icon(p, 1.0, 1.0, 0.6);
+                        let col = if ok {
+                            rgb(120, 230, 140)
+                        } else {
+                            rgb(255, 90, 80)
+                        };
+                        draw_rectangle_lines(p.x - 24.0, p.y - 30.0, 48.0, 40.0, 2.0, col);
+                    }
+                    None => draw_rectangle_lines(
+                        c as f32 * TILE + 2.0,
+                        HUD_H + r as f32 * TILE + 2.0,
+                        TILE - 4.0,
+                        TILE - 4.0,
+                        2.0,
+                        rgba(255, 90, 80, 160),
+                    ),
+                }
+            }
+            return;
+        }
         // Build ghost under the pointer (desktop hover).
-        if let (Some(k), Some((c, r))) = (self.build, tile_at(ui.pointer))
+        let build = match self.build {
+            Some(Tool::Tower(k)) => Some(k),
+            _ => None,
+        };
+        if let (Some(k), Some((c, r))) = (build, tile_at(world_pointer))
             && ui.pointer.y >= HUD_H
             && ui.pointer.y < PANEL_Y
+            && !over_nav
+            && self.drag.is_none()
             && self.game.tower_at(c, r).is_none()
         {
             {
@@ -519,6 +988,27 @@ impl App {
         };
         draw_rectangle(312.0, 36.0, 140.0 * f, 14.0, c);
         text(&format!("{}", g.seals()), 458.0, 49.0, 18.0, WHITE);
+        // IT server room.
+        if g.cameras_down() {
+            let blink = (self.time * 6.0).sin() > 0.0;
+            let c = if blink {
+                rgb(255, 90, 70)
+            } else {
+                rgb(150, 50, 40)
+            };
+            text(
+                &format!("IT DOWN {:.0}s", g.it_down().ceil()),
+                312.0,
+                66.0,
+                13.0,
+                c,
+            );
+        } else {
+            text("IT", 312.0, 66.0, 13.0, rgb(110, 170, 240));
+            let f = g.it_hp() / sc::stats::IT_HP;
+            draw_rectangle(332.0, 58.0, 120.0, 7.0, rgb(20, 26, 40));
+            draw_rectangle(332.0, 58.0, 120.0 * f, 7.0, rgb(90, 160, 255));
+        }
 
         // Speed / pause / autopilot.
         let b = |i: f32| Rect::new(W - 178.0 + i * 58.0, 10.0, 52.0, 52.0);
@@ -551,7 +1041,10 @@ impl App {
             tower_icon(t.kind, vec2(48.0, y + 56.0), t.level, None, 0.0, 1.0);
             text(t.kind.name(), 88.0, y + 42.0, 26.0, col);
             text(
-                &format!("LEVEL {}/{}   KILLS {}", t.level, MAX_TOWER_LEVEL, t.kills),
+                &format!(
+                    "LEVEL {}/{}   KILLS {}   HP {:.0}/{:.0}",
+                    t.level, MAX_TOWER_LEVEL, t.kills, t.hp, t.max_hp
+                ),
                 88.0,
                 y + 66.0,
                 16.0,
@@ -615,9 +1108,60 @@ impl App {
             return;
         }
 
+        if let Some(b) = self
+            .selected_barrier
+            .and_then(|id| self.game.barrier(id))
+            .cloned()
+        {
+            barrier_icon(vec2(48.0, y + 60.0), 1.4, b.hp / BARRIER_HP, 1.0);
+            text("BARRIER", 88.0, y + 42.0, 26.0, rgb(200, 160, 110));
+            text(
+                &format!(
+                    "HP {:.0}/{:.0}   LEVEL {}",
+                    b.hp,
+                    BARRIER_HP,
+                    sc::map::level_of_row(b.row)
+                ),
+                88.0,
+                y + 66.0,
+                16.0,
+                rgb(200, 200, 200),
+            );
+            let info = "Rebels must break it to climb on. Bare hands take ages; \
+                        tools from Supply smash it in seconds.";
+            for (i, l) in wrap(info, 15.0, 330.0).iter().enumerate() {
+                text(
+                    l,
+                    20.0,
+                    y + 104.0 + i as f32 * 20.0,
+                    15.0,
+                    rgb(170, 170, 176),
+                );
+            }
+            let label = format!("REMOVE +{}", b.refund());
+            if ui.button(
+                Rect::new(372.0, y + 14.0, 160.0, 148.0),
+                &[&label],
+                !self.game.is_over(),
+                rgb(220, 120, 90),
+            ) {
+                self.sell_selected();
+            }
+            if ui.button(
+                Rect::new(540.0, y + 14.0, 124.0, 148.0),
+                &["BACK"],
+                true,
+                rgb(150, 150, 160),
+            ) {
+                self.selected_barrier = None;
+            }
+            ui.hit(Rect::new(0.0, y, W, PANEL_H));
+            return;
+        }
+
         for (i, &k) in TowerKind::ALL.iter().enumerate() {
-            let r = Rect::new(8.0 + i as f32 * 134.0, y + 12.0, 126.0, 152.0);
-            let sel = self.build == Some(k);
+            let r = Rect::new(8.0 + i as f32 * 110.0, y + 12.0, 104.0, 152.0);
+            let sel = self.build == Some(Tool::Tower(k));
             let afford = self.game.chits() >= k.cost();
             let col = tower_color(k);
             let fill = if sel {
@@ -640,7 +1184,7 @@ impl App {
                 k.name(),
                 r.x + r.w / 2.0,
                 r.y + 96.0,
-                17.0,
+                15.0,
                 if afford { WHITE } else { rgb(120, 120, 120) },
             );
             let cost_col = if afford {
@@ -663,10 +1207,61 @@ impl App {
                 rgb(110, 110, 116),
             );
             if ui.hit(r) {
-                self.pick(k);
+                self.pick(Tool::Tower(k));
             }
         }
-        let r = Rect::new(546.0, y + 12.0, 118.0, 152.0);
+        // Barrier card.
+        {
+            let r = Rect::new(8.0 + 4.0 * 110.0, y + 12.0, 104.0, 152.0);
+            let sel = self.build == Some(Tool::Barrier);
+            let afford = self.game.chits() >= BARRIER_COST;
+            let col = rgb(200, 160, 110);
+            let fill = if sel {
+                shade(col, 0.35)
+            } else if ui.hovered(r) {
+                rgb(36, 38, 44)
+            } else {
+                rgb(28, 30, 34)
+            };
+            panel(r, fill, if sel { col } else { rgb(60, 62, 68) });
+            barrier_icon(
+                vec2(r.x + r.w / 2.0, r.y + 54.0),
+                1.2,
+                1.0,
+                if afford { 1.0 } else { 0.4 },
+            );
+            text_centered(
+                "Barrier",
+                r.x + r.w / 2.0,
+                r.y + 96.0,
+                15.0,
+                if afford { WHITE } else { rgb(120, 120, 120) },
+            );
+            let cost_col = if afford {
+                rgb(250, 210, 90)
+            } else {
+                rgb(200, 80, 70)
+            };
+            text_centered(
+                &format!("{BARRIER_COST}"),
+                r.x + r.w / 2.0,
+                r.y + 122.0,
+                22.0,
+                cost_col,
+            );
+            text("5", r.x + 8.0, r.y + 20.0, 14.0, rgb(110, 110, 116));
+            text_centered(
+                "ABOVE SUPPLY",
+                r.x + r.w / 2.0,
+                r.y + 142.0,
+                10.0,
+                rgb(140, 140, 146),
+            );
+            if ui.hit(r) {
+                self.pick(Tool::Barrier);
+            }
+        }
+        let r = Rect::new(560.0, y + 12.0, 104.0, 152.0);
         let building = self.game.phase() == Phase::Building;
         let next = format!("WAVE {}", self.game.wave() + 1);
         let lines: Vec<&str> = if building {
@@ -709,7 +1304,7 @@ impl App {
             self.start();
         }
         text_centered(
-            "1-4 build   N wave   U upgrade   X sell   F speed   T autopilot",
+            "1-4 build  5 barrier  N wave  U upgrade  X sell  W/S roll  F speed  T AI",
             W / 2.0,
             H - 40.0,
             15.0,

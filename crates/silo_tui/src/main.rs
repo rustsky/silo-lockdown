@@ -12,7 +12,7 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Widget, Wrap};
 use silo_core::bot::Bot;
-use silo_core::map::{COLS, PLAQUES, ROWS};
+use silo_core::map::{COLS, PLAQUES, ROWS, SECTIONS, VIEW_ROWS, level_of_row, section_of_row, section_view_top};
 use silo_core::stats::{MAX_TOWER_LEVEL, MAX_WAVES, START_SEALS};
 use silo_core::*;
 use std::collections::VecDeque;
@@ -22,7 +22,10 @@ use std::time::{Duration, Instant};
 const CW: i32 = 4;
 const CH: i32 = 2;
 const FIELD_W: u16 = (COLS * CW) as u16;
-const FIELD_H: u16 = (ROWS * CH) as u16;
+/// The field shows one section of the silo at a time.
+const FIELD_H: u16 = (VIEW_ROWS * CH) as u16;
+/// Height of the whole silo in cells.
+const WORLD_H: i32 = ROWS * CH;
 const FRAME: Duration = Duration::from_micros(33_333);
 
 fn main() -> std::io::Result<()> {
@@ -46,7 +49,11 @@ struct App {
     bot: Bot,
     autopilot: bool,
     cursor: (i32, i32),
+    /// Section shown in the field (0 = Up Top .. 2 = Down Deep).
+    view: usize,
     build: Option<TowerKind>,
+    /// Building barriers instead of towers.
+    barrier_mode: bool,
     speed: u32,
     paused: bool,
     effects: Vec<Effect>,
@@ -67,8 +74,10 @@ impl App {
             game,
             bot,
             autopilot: false,
-            cursor: (2, 11),
+            cursor: (2, ROWS - 2),
+            view: SECTIONS.len() - 1,
             build: Some(TowerKind::Deputy),
+            barrier_mode: false,
             speed: 1,
             paused: false,
             effects: Vec::new(),
@@ -79,6 +88,7 @@ impl App {
         };
         app.say(Line::from("You are IT. Mechanical is rising.".bold()));
         app.say(Line::from("Build on the walls, then press N to send the wave."));
+        app.say(Line::from("PgUp/PgDn (or [ ]) roll the view between the three sections."));
         app
     }
 
@@ -167,6 +177,33 @@ impl App {
             }
             Event::Won => self.say(Line::from("THE SILO HOLDS. The Pact endures.").green().bold()),
             Event::Lost => self.say(Line::from("THE AIRLOCK IS OPEN. They see the outside.").red().bold()),
+            Event::EnemyShot { from, to, .. } => {
+                let n = (from.distance(to) * 8.0).ceil() as i32;
+                let line = (1..n).map(|i| to_cell(from.lerp(to, i as f32 / n as f32))).collect();
+                self.effect(line, '·', Color::Rgb(255, 160, 60), 2);
+            }
+            Event::TowerDestroyed { kind, pos, .. } => {
+                self.effect(vec![to_cell(pos)], 'X', Color::Rgb(255, 120, 60), 12);
+                self.say(Line::from(format!("Armed rebels destroyed a {}!", kind.name())).red());
+            }
+            Event::ItCollapsed { seconds } => self.say(
+                Line::from(format!("IT HAS FALLEN. No cameras below Up Top for {seconds:.0}s.")).red().bold(),
+            ),
+            Event::SupplyJoined => self.say(
+                Line::from("SUPPLY JOINS THE UPRISING. Rebels passing the depot get guns and tools.").red().bold(),
+            ),
+            Event::Equipped { pos, gun, .. } => {
+                self.effect(vec![to_cell(pos)], if gun { '¬' } else { 'T' }, Color::Rgb(240, 150, 80), 10)
+            }
+            Event::BarrierBroken { pos, .. } => {
+                self.effect(vec![to_cell(pos)], '#', Color::Rgb(255, 160, 90), 12);
+                self.say(Line::from("A barrier was smashed!").yellow());
+            }
+            Event::ItRestored => self.say(Line::from("IT back online. Cameras restored.").cyan()),
+            Event::PowerCut { first, seconds, .. } => {
+                let name = SECTIONS[section_of_row(first)].0;
+                self.say(Line::from(format!("Main power cut: {name} is dark for {seconds:.0}s.")).yellow());
+            }
             _ => {}
         }
     }
@@ -188,8 +225,14 @@ impl App {
 
     fn act_at_cursor(&mut self) {
         let (c, r) = self.cursor;
-        if self.game.tower_at(c, r).is_some() {
+        if let Some(b) = self.game.barrier_at(c, r) {
+            let msg = format!("Barrier {:.0}/{:.0}. [x] removes it for {}.", b.hp, stats::BARRIER_HP, b.refund());
+            self.say(Line::from(msg));
+        } else if self.game.tower_at(c, r).is_some() {
             self.upgrade_at_cursor();
+        } else if self.barrier_mode {
+            let res = self.game.place_barrier(c, r).map(|_| ());
+            self.report(res);
         } else if let Some(kind) = self.build {
             let res = self.game.place(kind, c, r).map(|_| ());
             self.report(res);
@@ -207,11 +250,38 @@ impl App {
     }
 
     fn sell_at_cursor(&mut self) {
+        if let Some(id) = self.game.barrier_at(self.cursor.0, self.cursor.1).map(|b| b.id) {
+            let res = self.game.remove_barrier(id).map(|v| self.say(Line::from(format!("Barrier removed, +{v}."))));
+            self.report(res);
+            return;
+        }
         let res = match self.game.tower_at(self.cursor.0, self.cursor.1) {
             Some(t) => self.game.sell(t.id).map(|v| self.say(Line::from(format!("Sold for {v}.")))),
             None => Err(CommandError::NoSuchTower),
         };
         self.report(res);
+    }
+
+    fn view_top(&self) -> i32 {
+        section_view_top(self.view)
+    }
+
+    /// Roll the view one section up (-1) or down (+1); the cursor moves along.
+    fn scroll(&mut self, dir: i32) {
+        let next = (self.view as i32 + dir).clamp(0, SECTIONS.len() as i32 - 1) as usize;
+        if next != self.view {
+            let dy = section_view_top(next) - self.view_top();
+            self.cursor.1 = (self.cursor.1 + dy).clamp(0, ROWS - 1);
+            self.view = next;
+        }
+    }
+
+    /// Keep the cursor visible: switch sections when it walks off the top or bottom.
+    fn follow_cursor(&mut self) {
+        let r = self.cursor.1;
+        if r < self.view_top() || r >= self.view_top() + VIEW_ROWS {
+            self.view = section_of_row(r);
+        }
     }
 
     fn handle(&mut self, ev: TermEvent) {
@@ -231,8 +301,16 @@ impl App {
                     KeyCode::Char(ch @ '1'..='4') => {
                         let kind = TowerKind::ALL[(ch as u8 - b'1') as usize];
                         self.build = if self.build == Some(kind) { None } else { Some(kind) };
+                        self.barrier_mode = false;
                     }
-                    KeyCode::Esc => self.build = None,
+                    KeyCode::Char('5') | KeyCode::Char('b') => {
+                        self.barrier_mode = !self.barrier_mode;
+                        self.build = None;
+                    }
+                    KeyCode::Esc => {
+                        self.build = None;
+                        self.barrier_mode = false;
+                    }
                     KeyCode::Enter | KeyCode::Char(' ') => self.act_at_cursor(),
                     KeyCode::Char('u') => self.upgrade_at_cursor(),
                     KeyCode::Char('x') | KeyCode::Backspace | KeyCode::Delete => self.sell_at_cursor(),
@@ -247,9 +325,12 @@ impl App {
                         let s = if self.autopilot { "Autopilot ON (IT AI plays)." } else { "Autopilot OFF." };
                         self.say(Line::from(s).cyan());
                     }
+                    KeyCode::PageUp | KeyCode::Char('[') => self.scroll(-1),
+                    KeyCode::PageDown | KeyCode::Char(']') => self.scroll(1),
                     KeyCode::Char('r') if self.game.is_over() => *self = App::new(),
                     _ => {}
                 }
+                self.follow_cursor();
             }
             TermEvent::Mouse(m) => {
                 let f = self.field_rect;
@@ -257,7 +338,7 @@ impl App {
                 if x < f.x || y < f.y || x >= f.x + f.width || y >= f.y + f.height {
                     return;
                 }
-                let tile = (((x - f.x) as i32) / CW, ((y - f.y) as i32) / CH);
+                let tile = (((x - f.x) as i32) / CW, ((y - f.y) as i32) / CH + self.view_top());
                 match m.kind {
                     MouseEventKind::Moved => self.cursor = tile,
                     MouseEventKind::Down(MouseButton::Left) => {
@@ -268,6 +349,8 @@ impl App {
                         self.cursor = tile;
                         self.sell_at_cursor();
                     }
+                    MouseEventKind::ScrollUp => self.scroll(-1),
+                    MouseEventKind::ScrollDown => self.scroll(1),
                     _ => {}
                 }
             }
@@ -291,7 +374,13 @@ impl App {
         let [field_box, _] =
             Layout::vertical([Constraint::Length(FIELD_H + 2), Constraint::Min(0)]).areas(left);
 
-        let title = Line::from(" THE STAIRWELL ".bold()).centered();
+        let (name, first, last) = SECTIONS[self.view];
+        let title = Line::from(vec![
+            " THE STAIRWELL · ".bold(),
+            name.yellow().bold(),
+            format!(" levels {}-{} ", level_of_row(first), level_of_row(last) + 3).dark_gray(),
+        ])
+        .centered();
         let block = Block::bordered().title(title).border_style(Style::new().dark_gray());
         let inner = block.inner(field_box);
         self.field_rect = inner;
@@ -308,8 +397,10 @@ impl App {
                 ("←↑↓→", "move"),
                 ("1-4", "pick"),
                 ("⏎", "build/upg"),
+                ("5", "barrier"),
                 ("u", "upgrade"),
                 ("x", "sell"),
+                ("PgUp/Dn", "view"),
                 ("n", "wave"),
                 ("f", "speed"),
                 ("p", "pause"),
@@ -351,11 +442,42 @@ impl App {
         );
     }
 
+    fn it_line(&self) -> Line<'static> {
+        let g = &self.game;
+        if g.cameras_down() {
+            return Line::from(vec![
+                "IT    ".dark_gray(),
+                format!("DOWN {:.0}s — no cameras below Up Top", g.it_down().ceil()).red().bold(),
+            ]);
+        }
+        let n = (g.it_hp() / stats::IT_HP * 10.0).ceil() as usize;
+        Line::from(vec![
+            "IT    ".dark_gray(),
+            Span::styled(format!("{:<10}", "▮".repeat(n)), Style::new().fg(Color::Rgb(90, 160, 255))),
+            format!(" server room {:.0}/{:.0}", g.it_hp(), stats::IT_HP).dark_gray(),
+        ])
+    }
+
+    /// "View" line: the three sections, the visible one highlighted, with rebel counts.
+    fn sections_line(&self) -> Line<'static> {
+        let mut counts = [0usize; SECTIONS.len()];
+        for e in self.game.enemies().iter().filter(|e| self.game.is_visible(e.pos)) {
+            counts[section_of_row(e.pos.y.floor() as i32)] += 1;
+        }
+        let mut spans = vec!["View  ".dark_gray()];
+        for (i, (name, ..)) in SECTIONS.iter().enumerate() {
+            let label = format!(" {name} ");
+            spans.push(if i == self.view { label.black().on_yellow() } else { label.gray() });
+            spans.push(if counts[i] > 0 { format!("{} ", counts[i]).red().bold() } else { "  ".into() });
+        }
+        Line::from(spans)
+    }
+
     fn draw_panel(&self, f: &mut ratatui::Frame, area: Rect) {
         let g = &self.game;
         let [status, shop, info, log] = Layout::vertical([
+            Constraint::Length(9),
             Constraint::Length(7),
-            Constraint::Length(6),
             Constraint::Length(8),
             Constraint::Min(3),
         ])
@@ -390,6 +512,8 @@ impl App {
                 if self.autopilot { "  AUTOPILOT".cyan().bold() } else { "".into() },
                 format!("  t={:.0}s", g.time()).dark_gray(),
             ]),
+            self.it_line(),
+            self.sections_line(),
             if g.phase() == Phase::Building {
                 Line::from("Press N to send the next wave.".green().italic())
             } else {
@@ -421,17 +545,35 @@ impl App {
                 ])
             })
             .collect();
+        let mut shop_lines = shop_lines;
+        let style = if self.barrier_mode {
+            Style::new().fg(Color::Black).bg(BARRIER_FG)
+        } else if g.chits() >= stats::BARRIER_COST {
+            Style::new().fg(BARRIER_FG)
+        } else {
+            Style::new().fg(Color::DarkGray)
+        };
+        shop_lines.push(Line::from(vec![
+            Span::styled(format!(" 5 ▓ {:<12} {:>4} ", "Barrier", stats::BARRIER_COST), style),
+            " Blocks the stair. Only above Supply.".dark_gray(),
+        ]));
         f.render_widget(Paragraph::new(shop_lines).block(Block::bordered().title(" ARMORY ")), shop);
 
         // Cursor info
         let (c, r) = self.cursor;
         let mut lines = vec![];
-        if let Some(t) = g.tower_at(c, r) {
+        if let Some(b) = g.barrier_at(c, r) {
+            lines.push(Line::from(Span::styled("Barrier", Style::new().fg(BARRIER_FG).bold())));
+            lines.push(Line::from(format!("hp {:.0}/{:.0}", b.hp, stats::BARRIER_HP)));
+            lines.push(Line::from("Bare hands barely dent it; tools from Supply smash it.".dark_gray()));
+            lines.push(Line::from(vec!["[x] remove for ".into(), format!("{}", b.refund()).yellow()]));
+        } else if let Some(t) = g.tower_at(c, r) {
             let s = t.stats();
             lines.push(Line::from(vec![
                 Span::styled(format!("{} ", t.kind.name()), Style::new().fg(tower_color(t.kind)).bold()),
                 format!("Lv {}/{MAX_TOWER_LEVEL}", t.level).into(),
                 format!("   kills {}", t.kills).dark_gray(),
+                format!("   hp {:.0}/{:.0}", t.hp, t.max_hp).into(),
             ]));
             lines.push(Line::from(format!(
                 "dmg {:.0}  range {:.1}  every {:.2}s{}",
@@ -459,10 +601,14 @@ impl App {
             });
             lines.push(Line::from(vec!["[x] sell for ".into(), format!("{}", t.sell_value()).yellow()]));
         } else {
-            let plaque = PLAQUES.iter().find(|p| p.0 == r || p.0 == r + 1);
-            let where_ = plaque.map_or(String::new(), |p| format!(" (level ~{}, {})", p.1, p.2));
+            let where_ = format!(" (level ~{}, {})", level_of_row(r), SECTIONS[section_of_row(r)].0);
             let desc = match g.map().tile(c, r) {
                 Tile::Floor => format!("Living quarters{where_}. Buildable."),
+                Tile::ItRoom => "IT's server room. If it falls, the cameras below Up Top go dark.".into(),
+                Tile::SupplyRoom if g.supply_joined() => {
+                    "Supply depot. Supply has joined the uprising: guns and tools for every rebel passing.".into()
+                }
+                Tile::SupplyRoom => "Supply depot. Still loyal... for now.".into(),
                 Tile::Shaft => format!("Catwalk over the stairwell{where_}. Buildable."),
                 Tile::Stairs => "The spiral stair. The uprising climbs here.".into(),
                 Tile::Rock => "Silo wall. Solid concrete and earth.".into(),
@@ -471,7 +617,12 @@ impl App {
                 Tile::OffMap => String::new(),
             };
             lines.push(Line::from(desc));
-            if let (Some(k), true) = (self.build, g.map().buildable(c, r)) {
+            if self.barrier_mode {
+                lines.push(match g.can_place_barrier(c, r) {
+                    Ok(()) => Line::from(format!("[⏎] build barrier for {}", stats::BARRIER_COST)).green(),
+                    Err(e) => Line::from(format!("{e}")).red(),
+                });
+            } else if let (Some(k), true) = (self.build, g.map().buildable(c, r)) {
                 lines.push(match g.can_place(k, c, r) {
                     Ok(()) => Line::from(format!("[⏎] build {} for {}", k.name(), k.cost())).green(),
                     Err(e) => Line::from(format!("{e}")).red(),
@@ -542,8 +693,9 @@ fn cells_in_circle(c: Vec2, r: f32) -> Vec<(i32, i32)> {
         .collect()
 }
 
-/// Cell at field-relative (x, y), or None if outside the field.
-fn cell_at(buf: &mut Buffer, area: Rect, x: i32, y: i32) -> Option<&mut ratatui::buffer::Cell> {
+/// Cell at world-cell (x, y) given the view's top cell row `oy`, or None if not visible.
+fn cell_at(buf: &mut Buffer, area: Rect, oy: i32, x: i32, y: i32) -> Option<&mut ratatui::buffer::Cell> {
+    let y = y - oy;
     if x < 0 || y < 0 || x >= area.width as i32 || y >= area.height as i32 {
         return None;
     }
@@ -557,6 +709,7 @@ const FLOOR_BG: Color = Color::Rgb(36, 38, 42);
 const SHAFT_BG: Color = Color::Rgb(14, 16, 22);
 const PILLAR_FG: Color = Color::Rgb(78, 82, 90);
 const STAIR_FRONT: Color = Color::Rgb(200, 138, 72);
+const BARRIER_FG: Color = Color::Rgb(200, 160, 110);
 const STAIR_BACK: Color = Color::Rgb(92, 68, 50);
 
 /// Cheap deterministic per-cell noise for textures.
@@ -568,14 +721,14 @@ fn noise(x: i32, y: i32) -> u32 {
 
 /// Draw one pass of the spiral stair. Half-block glyphs give 2 sub-rows per cell, so the
 /// diagonal reads as a run of steps.
-fn draw_stair(buf: &mut Buffer, area: Rect, a: Vec2, b: Vec2, fg: Color) {
+fn draw_stair(buf: &mut Buffer, area: Rect, oy: i32, a: Vec2, b: Vec2, fg: Color) {
     if (a.x - b.x).abs() < 1e-3 {
         // Vertical hatch ladder up into the airlock.
         let x = (a.x * CW as f32).floor() as i32;
         let (y0, y1) = ((b.y * CH as f32) as i32, (a.y * CH as f32) as i32);
         for y in y0..=y1 {
             for (dx, ch) in [(-1, '╟'), (0, '╢')] {
-                if let Some(c) = cell_at(buf, area, x + dx, y) {
+                if let Some(c) = cell_at(buf, area, oy, x + dx, y) {
                     c.set_char(ch).set_fg(fg);
                 }
             }
@@ -589,7 +742,7 @@ fn draw_stair(buf: &mut Buffer, area: Rect, a: Vec2, b: Vec2, fg: Color) {
         let wy = (a.y + (b.y - a.y) * t) * CH as f32;
         let y = wy.floor() as i32;
         let ch = if wy - (y as f32) < 0.5 { '▀' } else { '▄' };
-        if let Some(c) = cell_at(buf, area, x, y) {
+        if let Some(c) = cell_at(buf, area, oy, x, y) {
             c.set_char(ch).set_fg(fg);
         }
     }
@@ -597,7 +750,7 @@ fn draw_stair(buf: &mut Buffer, area: Rect, a: Vec2, b: Vec2, fg: Color) {
     for p in [a, b] {
         let (px, py) = to_cell(p);
         for dx in -1..=0 {
-            if let Some(c) = cell_at(buf, area, px + dx, py) {
+            if let Some(c) = cell_at(buf, area, oy, px + dx, py) {
                 c.set_char('▬').set_fg(fg);
             }
         }
@@ -612,7 +765,7 @@ fn dim(c: Color) -> Color {
 }
 
 fn section_short(name: &str) -> String {
-    name.split_whitespace().last().unwrap_or("").chars().take(4).collect()
+    name.chars().take(4).collect()
 }
 
 impl Widget for FieldView<'_> {
@@ -620,8 +773,9 @@ impl Widget for FieldView<'_> {
         let app = self.app;
         let g = &app.game;
         let map = g.map();
+        let oy = app.view_top() * CH;
         let put = |buf: &mut Buffer, cx: i32, cy: i32, ch: char, style: Style| {
-            if let Some(cell) = cell_at(buf, area, cx, cy) {
+            if let Some(cell) = cell_at(buf, area, oy, cx, cy) {
                 cell.set_char(ch).set_style(style);
             }
         };
@@ -629,7 +783,7 @@ impl Widget for FieldView<'_> {
         let silo_x = (CW, (COLS - 1) * CW); // inner wall span in cells
 
         // Background, per cell.
-        for y in 0..FIELD_H as i32 {
+        for y in oy..oy + FIELD_H as i32 {
             for x in 0..FIELD_W as i32 {
                 let (c, r) = (x / CW, y / CH);
                 let sub = y % CH;
@@ -661,6 +815,8 @@ impl Widget for FieldView<'_> {
                         }
                     }
                     Tile::Stairs | Tile::Shaft => (' ', Style::new().bg(SHAFT_BG)),
+                    Tile::ItRoom => (' ', Style::new().bg(Color::Rgb(16, 24, 40))),
+                    Tile::SupplyRoom => (' ', Style::new().bg(Color::Rgb(40, 32, 22))),
                     Tile::OffMap => continue,
                 };
                 put(buf, x, y, ch, style);
@@ -669,7 +825,7 @@ impl Widget for FieldView<'_> {
 
         // Concrete inner face of the cylinder wall, curving in at the dome.
         let concrete = Style::new().bg(ROCK_BG).fg(Color::Rgb(120, 122, 126));
-        for y in CH..FIELD_H as i32 {
+        for y in CH..WORLD_H {
             let dome = y < 2 * CH; // row 1: the shoulders
             let (l, r) = if dome { (2 * CW - 1, (COLS - 2) * CW) } else { (CW - 1, (COLS - 1) * CW) };
             put(buf, l, y, '▐', concrete);
@@ -682,10 +838,12 @@ impl Widget for FieldView<'_> {
 
         // Level numbers on the left wall, section names on the right.
         let label = Style::new().bg(ROCK_BG).fg(Color::Rgb(214, 180, 90)).bold();
-        for &(row, level, name) in PLAQUES {
-            for (dx, ch) in format!("{level:>3}").chars().enumerate() {
+        for row in (2..ROWS).step_by(2) {
+            for (dx, ch) in format!("{:>3}", level_of_row(row)).chars().enumerate() {
                 put(buf, dx as i32, row * CH, ch, label);
             }
+        }
+        for &(row, name) in PLAQUES {
             for (dx, ch) in format!("{:>4}", section_short(name)).chars().enumerate() {
                 put(buf, (COLS - 1) * CW + dx as i32, row * CH, ch, label);
             }
@@ -694,20 +852,20 @@ impl Widget for FieldView<'_> {
         // The spiral: back passes, then the central pillar, then front passes on top.
         for (a, b, front) in map.segments() {
             if !front {
-                draw_stair(buf, area, a, b, STAIR_BACK);
+                draw_stair(buf, area, oy, a, b, STAIR_BACK);
             }
         }
         let px = (map::PILLAR_X * CW as f32) as i32;
-        for y in CH..FIELD_H as i32 {
+        for y in CH..WORLD_H {
             for (dx, ch) in [(-1, '▐'), (0, '▌')] {
-                if let Some(c) = cell_at(buf, area, px + dx, y).filter(|c| c.symbol() == " ") {
+                if let Some(c) = cell_at(buf, area, oy, px + dx, y).filter(|c| c.symbol() == " ") {
                     c.set_char(ch).set_fg(PILLAR_FG);
                 }
             }
         }
         for (a, b, front) in map.segments() {
             if front {
-                draw_stair(buf, area, a, b, STAIR_FRONT);
+                draw_stair(buf, area, oy, a, b, STAIR_FRONT);
             }
         }
 
@@ -733,7 +891,7 @@ impl Widget for FieldView<'_> {
             .or_else(|| app.build.filter(|_| map.buildable(cc, cr)).map(|k| k.stats(1).range));
         if let Some(range) = preview {
             for cell in cells_in_circle(map::tile_center(cc, cr), range) {
-                if let Some(c) = cell_at(buf, area, cell.0, cell.1) {
+                if let Some(c) = cell_at(buf, area, oy, cell.0, cell.1) {
                     let bg = match c.bg {
                         Color::Rgb(r, gg, b) => Color::Rgb(r.saturating_add(18), gg.saturating_add(30), b.saturating_add(18)),
                         other => other,
@@ -757,18 +915,115 @@ impl Widget for FieldView<'_> {
             for (dx, ch) in format!(" {pips}").chars().enumerate() {
                 put(buf, x0 + dx as i32, y0 + 1, ch, Style::new().bg(Color::Rgb(20, 22, 26)).fg(Color::Yellow));
             }
+            if t.hp < t.max_hp {
+                let f = t.hp / t.max_hp;
+                let c = if f > 0.5 { Color::Green } else if f > 0.25 { Color::Yellow } else { Color::Red };
+                put(buf, x0, y0 + 1, '♥', Style::new().bg(Color::Rgb(20, 22, 26)).fg(c));
+            }
+        }
+
+        // Supply depot.
+        {
+            let (c0, r) = map::SUPPLY_ROOM[0];
+            let (x0, y0) = (c0 * CW, r * CH);
+            let joined = g.supply_joined();
+            let room = Style::new().bg(Color::Rgb(40, 32, 22));
+            let fg = if joined { Color::Rgb(240, 100, 70) } else { Color::Rgb(220, 184, 92) };
+            for (dx, ch) in (if joined { "SUPPLY ⚑" } else { "SUPPLY  " }).chars().enumerate() {
+                put(buf, x0 + dx as i32, y0, ch, room.fg(fg).bold());
+            }
+            for (dx, ch) in "▤▤ ▤▤▤ ▤".chars().enumerate() {
+                put(buf, x0 + dx as i32, y0 + 1, ch, room.fg(Color::Rgb(150, 115, 70)));
+            }
+        }
+
+        // Barriers across the stair.
+        for b in g.barriers() {
+            let (x, y) = to_cell(b.pos);
+            let f = b.hp / stats::BARRIER_HP;
+            let ch = if f > 0.66 { '▓' } else if f > 0.33 { '▒' } else { '░' };
+            for dx in -1..=1 {
+                put(buf, x + dx, y, ch, Style::new().fg(BARRIER_FG).bg(Color::Rgb(50, 38, 24)).bold());
+            }
+        }
+
+        // IT's server room.
+        {
+            let (c0, r) = map::IT_ROOM[0];
+            let (x0, y0) = (c0 * CW, r * CH);
+            let w = map::IT_ROOM.len() as i32 * CW;
+            let room = Style::new().bg(Color::Rgb(16, 24, 40));
+            let (top, top_fg) = if g.cameras_down() {
+                (format!("IT {:>3.0}s", g.it_down().ceil()), Color::Red)
+            } else {
+                let n = (g.it_hp() / stats::IT_HP * 5.0).ceil() as usize;
+                (format!("IT{:<5}", "▮".repeat(n)), Color::Rgb(110, 170, 240))
+            };
+            for (dx, ch) in top.chars().take(w as usize).enumerate() {
+                put(buf, x0 + dx as i32, y0, ch, room.fg(top_fg).bold());
+            }
+            for dx in 0..w {
+                let lit = !g.cameras_down() && noise(dx, (g.tick() / 8) as i32) < 150;
+                let fg = if lit { Color::Rgb(90, 240, 120) } else { Color::Rgb(50, 54, 62) };
+                put(buf, x0 + dx, y0 + 1, if dx % 2 == 0 { '▥' } else { '▤' }, room.fg(fg));
+            }
+        }
+
+        // What IT can't see: whole sections without power, or everything below Up Top while
+        // the server room is down. Drawn over the towers; rebels and shots there are skipped.
+        for y in oy..oy + FIELD_H as i32 {
+            let row = y / CH;
+            if !g.is_row_dark(row) {
+                continue;
+            }
+            let no_signal = g.cameras_down() && row > SECTIONS[0].2;
+            for x in 0..FIELD_W as i32 {
+                let (ch, st) = if no_signal {
+                    let n = noise(x, y ^ (g.tick() / 3) as i32);
+                    let ch = if n < 40 { '░' } else if n < 60 { '▒' } else { ' ' };
+                    (ch, Style::new().bg(Color::Rgb(8, 8, 10)).fg(Color::Rgb(90, 90, 90)))
+                } else if !(CW..(COLS - 1) * CW).contains(&x) {
+                    continue; // the earth outside the silo is unaffected
+                } else {
+                    (' ', Style::new().bg(Color::Rgb(4, 4, 6)))
+                };
+                put(buf, x, y, ch, st);
+            }
+        }
+        // Label each dark section that is on screen.
+        for (i, &(name, first, last)) in SECTIONS.iter().enumerate() {
+            if !g.is_row_dark(first) {
+                continue;
+            }
+            let (msg, fg) = if g.cameras_down() && i > 0 {
+                (format!(" NO SIGNAL · IT DOWN {:.0}s ", g.it_down().ceil()), Color::Red)
+            } else {
+                (format!(" NO POWER · {name} IS DARK "), Color::Rgb(170, 150, 100))
+            };
+            let mid = (first + last + 1) * CH / 2;
+            let y = mid.clamp(oy + 1, oy + FIELD_H as i32 - 2);
+            if !(first * CH..=(last + 1) * CH).contains(&y) {
+                continue;
+            }
+            let x0 = (FIELD_W as i32 - msg.chars().count() as i32) / 2;
+            for (dx, ch) in msg.chars().enumerate() {
+                put(buf, x0 + dx as i32, y, ch, Style::new().bg(Color::Black).fg(fg).bold());
+            }
         }
 
         // Effects (below enemies)
         for e in &app.effects {
             for &(x, y) in &e.cells {
-                if let Some(cell) = cell_at(buf, area, x, y) {
+                if g.is_row_dark(y / CH) {
+                    continue;
+                }
+                if let Some(cell) = cell_at(buf, area, oy, x, y) {
                     cell.set_char(e.ch).set_fg(e.color);
                 }
             }
         }
         let mut put = |cx: i32, cy: i32, ch: char, fg: Color, bold: bool| {
-            if let Some(cell) = cell_at(buf, area, cx, cy) {
+            if let Some(cell) = cell_at(buf, area, oy, cx, cy) {
                 cell.set_char(ch).set_fg(fg);
                 if bold {
                     cell.modifier.insert(Modifier::BOLD);
@@ -777,7 +1032,7 @@ impl Widget for FieldView<'_> {
         };
 
         // Projectiles
-        for p in g.projectiles() {
+        for p in g.projectiles().iter().filter(|p| g.is_visible(p.pos)) {
             let (x, y) = to_cell(p.pos);
             match p.kind {
                 ProjectileKind::Bullet => put(x, y, '•', Color::LightYellow, false),
@@ -786,7 +1041,7 @@ impl Widget for FieldView<'_> {
         }
 
         // Enemies: furthest along drawn last (on top).
-        let mut enemies: Vec<&Enemy> = g.enemies().iter().collect();
+        let mut enemies: Vec<&Enemy> = g.enemies().iter().filter(|e| g.is_visible(e.pos)).collect();
         enemies.sort_by(|a, b| a.dist.total_cmp(&b.dist));
         for e in enemies {
             let (x, y) = to_cell(vec2(e.pos.x + e.lane, e.pos.y));
@@ -800,12 +1055,22 @@ impl Widget for FieldView<'_> {
             } else {
                 Color::Rgb(255, 60, 40)
             };
+            // Supply's guns show as green, tools as cyan.
+            let fg = if e.armed {
+                Color::Rgb(150, 230, 110)
+            } else if e.tools {
+                Color::Rgb(120, 220, 230)
+            } else {
+                fg
+            };
             let fg = if map.is_front(e.dist) { fg } else { dim(fg) };
             put(x, y, enemy_glyph(e.kind), fg, true);
         }
 
         // Cursor
-        let style = if app.build.is_some() && g.can_place(app.build.unwrap(), cc, cr).is_ok() {
+        let style = if (app.build.is_some() && g.can_place(app.build.unwrap(), cc, cr).is_ok())
+            || (app.barrier_mode && g.can_place_barrier(cc, cr).is_ok())
+        {
             Color::LightGreen
         } else if g.tower_at(cc, cr).is_some() {
             Color::LightCyan
@@ -858,6 +1123,84 @@ mod tests {
         }
         assert!(app.game.is_over(), "autopilot game never ended");
         println!("{snapshot}\n\n{}", render(&mut app, 100, 30));
+    }
+
+    #[test]
+    fn scrolling_between_sections() {
+        let mut app = App::new();
+        assert_eq!(app.view, 2, "starts where the uprising starts");
+        let deep = render(&mut app, 100, 30);
+        assert!(deep.contains("DOWN DEEP") && deep.contains("MECH"));
+        app.handle(TermEvent::Key(KeyCode::PageUp.into()));
+        assert_eq!(app.view, 1);
+        assert_eq!(app.cursor.1, ROWS - 2 - 12, "cursor rolls with the view");
+        app.handle(TermEvent::Key(KeyCode::PageUp.into()));
+        app.handle(TermEvent::Key(KeyCode::PageUp.into()));
+        assert_eq!(app.view, 0, "clamped at the top");
+        let top = render(&mut app, 100, 30);
+        assert!(top.contains("UP TOP") && top.contains("◖████◗"), "airlock visible up top");
+        // Walking the cursor off the bottom of the view rolls down a section.
+        app.cursor = (2, section_view_top(0) + VIEW_ROWS - 1);
+        app.handle(TermEvent::Key(KeyCode::Down.into()));
+        assert_eq!(app.view, 1);
+        // Clicking in the mids view targets mids rows.
+        render(&mut app, 100, 30);
+        let f = app.field_rect;
+        app.handle(TermEvent::Mouse(ratatui::crossterm::event::MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: f.x + 2,
+            row: f.y + 2 * CH as u16,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        }));
+        assert_eq!(app.cursor, (0, section_view_top(1) + 2));
+    }
+
+    #[test]
+    fn power_cut_blacks_out_a_section() {
+        let mut app = App::new();
+        app.game = Game::new(5);
+        app.bot = Bot::balanced(app.game.map());
+        app.autopilot = true;
+        let mut ticks = 0;
+        while app.game.blackouts().is_empty() && !app.game.is_over() && ticks < 3_000_000 {
+            app.update();
+            ticks += 1;
+        }
+        let b = app.game.blackouts()[0];
+        app.view = section_of_row(b.first);
+        let out = render(&mut app, 100, 30);
+        println!("{out}");
+        assert!(out.contains("NO POWER"), "dark section not labelled");
+        // No rebel glyphs inside the dark band.
+        let f = app.field_rect;
+        let lines: Vec<&str> = out.lines().collect();
+        for row in b.first.max(app.view_top())..=b.last.min(app.view_top() + VIEW_ROWS - 1) {
+            for sub in 0..CH {
+                let y = f.y as i32 + (row - app.view_top()) * CH + sub;
+                let line: String = lines[y as usize].chars().skip(f.x as usize + CW as usize).take(FIELD_W as usize - 2 * CW as usize).collect();
+                assert!(!line.chars().any(|c| "pmM&".contains(c)) || line.contains("NO POWER") || line.contains("DARK"), "rebel visible in the dark: {line}");
+            }
+        }
+    }
+
+    #[test]
+    fn barrier_via_keys() {
+        let mut app = App::new();
+        app.view = 1;
+        app.cursor = (4, 20);
+        app.handle(TermEvent::Key(KeyCode::Char('5').into()));
+        assert!(app.barrier_mode);
+        app.handle(TermEvent::Key(KeyCode::Enter.into()));
+        assert!(app.game.barrier_at(4, 20).is_some(), "barrier placed");
+        let out = render(&mut app, 100, 30);
+        assert!(out.contains("▓▓"), "barrier drawn:\n{out}");
+        // Below Supply is refused.
+        app.cursor = (4, 32);
+        app.handle(TermEvent::Key(KeyCode::Enter.into()));
+        assert!(app.game.barrier_at(4, 32).is_none());
+        app.cursor = (4, 20);
+        app.handle(TermEvent::Key(KeyCode::Char('x').into()));
+        assert!(app.game.barriers().is_empty(), "barrier removed");
     }
 
     #[test]

@@ -6,6 +6,21 @@ pub const MAX_WAVES: u32 = 20;
 pub const MAX_TOWER_LEVEL: u8 = 3;
 pub const SELL_REFUND: f32 = 0.6;
 
+/// IT's server room. When it collapses, IT loses the cameras below Up Top for a while.
+pub const IT_HP: f32 = 50.0;
+pub const IT_DOWN_TIME: f32 = 25.0;
+/// From this wave on Supply joins the uprising: rebels passing the Supply depot pick up guns
+/// and breaching tools.
+pub const SUPPLY_JOINS_WAVE: u32 = 6;
+/// Barriers: built on the stair above Supply; rebels must break them to climb on.
+pub const BARRIER_COST: u32 = 40;
+pub const BARRIER_HP: f32 = 200.0;
+/// Barrier damage per second: bare hands, or tools from Supply.
+pub const FIST_DPS: f32 = 1.0;
+pub const TOOLS_DPS: f32 = 25.0;
+/// From this wave on, rebels cut the main power during waves: a whole section goes dark.
+pub const POWER_CUT_WAVE: u32 = 15;
+
 // ---------------------------------------------------------------- towers
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -51,6 +66,18 @@ impl TowerKind {
     }
 
     /// Cost to go from `level` to `level + 1`, or None at max level.
+    /// Hit points (armed rebels shoot back). Destroyed towers are lost; survivors are repaired
+    /// between waves.
+    pub fn max_hp(self, level: u8) -> f32 {
+        let base = match self {
+            Self::Deputy => 90.0,
+            Self::Jammer => 70.0,
+            Self::Gas => 100.0,
+            Self::Marksman => 75.0,
+        };
+        base * (1.0 + 0.25 * (level.clamp(1, MAX_TOWER_LEVEL) - 1) as f32)
+    }
+
     pub fn upgrade_cost(self, level: u8) -> Option<u32> {
         (level < MAX_TOWER_LEVEL).then(|| (self.cost() as f32 * 0.8 * level as f32).round() as u32)
     }
@@ -141,6 +168,14 @@ pub enum EnemyKind {
     Leader,
 }
 
+/// The rifle Supply hands out.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Gun {
+    pub range: f32,
+    pub damage: f32,
+    pub cooldown: f32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EnemyStats {
     pub hp: f32,
@@ -167,12 +202,24 @@ impl EnemyKind {
 
     pub fn base(self) -> EnemyStats {
         match self {
-            Self::Porter => EnemyStats { hp: 30.0, speed: 0.95, armor: 0.0, bounty: 4, breach: 1 },
-            Self::Mechanic => EnemyStats { hp: 75.0, speed: 0.6, armor: 1.0, bounty: 7, breach: 1 },
-            Self::Miner => EnemyStats { hp: 220.0, speed: 0.36, armor: 4.0, bounty: 14, breach: 2 },
-            Self::Leader => EnemyStats { hp: 1100.0, speed: 0.28, armor: 5.0, bounty: 90, breach: 5 },
+            Self::Porter => EnemyStats { hp: 30.0, speed: 0.95 * SPEED_SCALE, armor: 0.0, bounty: 4, breach: 1 },
+            Self::Mechanic => EnemyStats { hp: 75.0, speed: 0.6 * SPEED_SCALE, armor: 1.0, bounty: 7, breach: 1 },
+            Self::Miner => EnemyStats { hp: 220.0, speed: 0.36 * SPEED_SCALE, armor: 4.0, bounty: 14, breach: 2 },
+            Self::Leader => EnemyStats { hp: 1100.0, speed: 0.28 * SPEED_SCALE, armor: 5.0, bounty: 90, breach: 5 },
         }
     }
+
+    /// Damage per second dealt to IT's server room while in reach.
+    pub fn it_dps(self, n: u32) -> f32 {
+        let base = match self {
+            Self::Porter => 4.0,
+            Self::Mechanic => 5.0,
+            Self::Miner => 8.0,
+            Self::Leader => 20.0,
+        };
+        base * (1.0 + 0.05 * n.saturating_sub(1) as f32)
+    }
+
 
     /// Stats scaled for wave `n` (1-based).
     pub fn for_wave(self, n: u32) -> EnemyStats {
@@ -185,6 +232,30 @@ impl EnemyKind {
             ..b
         }
     }
+}
+
+/// Enemies climb faster than the base table to make up for the tall (three-section) stairwell.
+pub const SPEED_SCALE: f32 = 1.2;
+
+/// The gun an armed rebel carries in wave `n`.
+pub fn rebel_gun(n: u32) -> Gun {
+    Gun { range: 1.8, damage: 3.0 * (1.0 + 0.05 * n.saturating_sub(1) as f32), cooldown: 2.4 }
+}
+
+/// Chance that a rebel passing the Supply depot in wave `n` is handed (a gun, breaching tools).
+/// Zero until Supply joins; grows as the war goes on.
+pub fn supply_odds(n: u32) -> (f32, f32) {
+    if n < SUPPLY_JOINS_WAVE {
+        return (0.0, 0.0);
+    }
+    let k = (n - SUPPLY_JOINS_WAVE) as f32;
+    ((0.04 + 0.006 * k).min(0.15), (0.25 + 0.03 * k).min(0.65))
+}
+
+/// Barrier damage per second from one rebel in wave `n`.
+pub fn barrier_dps(tools: bool, n: u32) -> f32 {
+    let base = if tools { TOOLS_DPS } else { FIST_DPS };
+    base * (1.0 + 0.05 * n.saturating_sub(1) as f32)
 }
 
 pub fn hp_multiplier(n: u32) -> f32 {
@@ -238,16 +309,16 @@ pub fn wave_lore(n: u32) -> &'static str {
         "Someone spoke of the outside. The stairwell fills.",
         "Miners leave the Deep with tools in hand.",
         "Supply has opened its doors to them.",
-        "The Mids are choosing sides.",
+        "Supply joins the uprising. Guns and tools wait for them at the depot.",
         "Graffiti on the landings: 'WE WANT TO SEE'.",
-        "Power flickers. Mechanical is cutting the lines.",
+        "Power flickers. Mechanical is testing the lines.",
         "IT orders a full lockdown. They climb anyway.",
         "A leader rises from Mechanical.",
         "Rumours of other silos spread on every level.",
         "The Pact is being read aloud in the stairwell.",
         "Deputies are defecting. Hold the landings.",
         "Smoke rises from the Down Deep.",
-        "The leader returns, angrier.",
+        "The leader returns. Mechanical cuts the main power: whole sections go dark.",
         "They have breached Supply's armory.",
         "Every porter in the silo is running.",
         "The Mids have fallen. Only Up Top remains.",

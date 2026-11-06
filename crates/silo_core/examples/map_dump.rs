@@ -14,6 +14,8 @@ fn main() {
                 Tile::Stairs => 'S',
                 Tile::Shaft => '.',
                 Tile::Floor => '_',
+                Tile::ItRoom => 'I',
+                Tile::SupplyRoom => '$',
                 Tile::OffMap => ' ',
             })
             .collect();

@@ -14,7 +14,7 @@ pub mod math;
 pub mod rng;
 pub mod stats;
 
-pub use game::{Command, CommandError, Enemy, Event, Game, Id, Phase, Projectile, ProjectileKind, TICK, Tower};
+pub use game::{Barrier, Blackout, Command, CommandError, Enemy, Event, Game, Id, Phase, Projectile, ProjectileKind, TICK, Tower};
 pub use map::{Map, Tile};
 pub use math::{Vec2, vec2};
 pub use stats::{EnemyKind, TowerKind};

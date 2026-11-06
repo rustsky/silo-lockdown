@@ -2,7 +2,9 @@
 //! times per frame for fast-forward), issue commands, and render from the read-only accessors and
 //! the event stream.
 
-use crate::map::{Map, in_bounds, tile_center};
+use crate::map::{
+    IT_REACH, Map, ROWS, SECTIONS, SUPPLY_REACH, in_bounds, it_center, supply_center, tile_center,
+};
 use crate::math::Vec2;
 use crate::rng::Rng;
 use crate::stats::*;
@@ -11,6 +13,8 @@ use std::collections::VecDeque;
 /// Simulation step in seconds (30 Hz).
 pub const TICK: f32 = 1.0 / 30.0;
 const MAX_BUFFERED_EVENTS: usize = 4096;
+/// Rebels pile up this far (tiles) below a barrier.
+const BARRIER_STOP: f32 = 0.25;
 
 pub type Id = u32;
 
@@ -40,6 +44,9 @@ pub struct Tower {
     /// Last aim point, for renderers.
     pub aim: Option<Vec2>,
     pub kills: u32,
+    /// Armed rebels shoot towers; at 0 the tower is destroyed. Repaired between waves.
+    pub hp: f32,
+    pub max_hp: f32,
 }
 
 impl Tower {
@@ -73,6 +80,16 @@ pub struct Enemy {
     pub slow_time: f32,
     /// Cosmetic sideways offset (-0.2..0.2) so crowds don't overlap. Not used by logic.
     pub lane: f32,
+    /// Handed a rifle by Supply: shoots towers in passing.
+    pub armed: bool,
+    /// Handed breaching tools by Supply: smashes barriers quickly.
+    pub tools: bool,
+    /// Already went past the Supply depot.
+    pub supplied: bool,
+    /// Stopped at a barrier, beating on it.
+    pub blocked: bool,
+    /// Seconds until an armed rebel may fire again.
+    pub gun_cooldown: f32,
     last_hit_by: Option<Id>,
 }
 
@@ -82,6 +99,24 @@ impl Enemy {
     }
     pub fn is_slowed(&self) -> bool {
         self.slow_time > 0.0 && self.slow > 0.0
+    }
+}
+
+/// Barricade across the stair. Rebels can't pass until they break it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Barrier {
+    pub id: Id,
+    pub col: i32,
+    pub row: i32,
+    /// Distance along the path where it stands.
+    pub dist: f32,
+    pub pos: Vec2,
+    pub hp: f32,
+}
+
+impl Barrier {
+    pub fn refund(&self) -> u32 {
+        (BARRIER_COST as f32 * SELL_REFUND * self.hp / BARRIER_HP).floor() as u32
     }
 }
 
@@ -112,6 +147,8 @@ pub enum Command {
     Place { kind: TowerKind, col: i32, row: i32 },
     Upgrade { tower: Id },
     Sell { tower: Id },
+    PlaceBarrier { col: i32, row: i32 },
+    RemoveBarrier { barrier: Id },
     SendWave,
 }
 
@@ -125,6 +162,9 @@ pub enum CommandError {
     NoSuchTower,
     MaxLevel,
     WaveInProgress,
+    /// Barriers only go on the stair above the Supply depot.
+    BarrierNotAllowed,
+    NoSuchBarrier,
 }
 
 impl std::fmt::Display for CommandError {
@@ -138,6 +178,8 @@ impl std::fmt::Display for CommandError {
             Self::NoSuchTower => write!(f, "no tower there"),
             Self::MaxLevel => write!(f, "already max level"),
             Self::WaveInProgress => write!(f, "wave already in progress"),
+            Self::BarrierNotAllowed => write!(f, "barriers go on the stair above Supply"),
+            Self::NoSuchBarrier => write!(f, "no barrier there"),
         }
     }
 }
@@ -158,8 +200,31 @@ pub enum Event {
     Shot { tower: Id, kind: TowerKind, from: Vec2, to: Vec2 },
     Pulse { tower: Id, pos: Vec2, radius: f32 },
     Explosion { pos: Vec2, radius: f32 },
+    /// An armed rebel fired at a tower.
+    EnemyShot { enemy: Id, tower: Id, from: Vec2, to: Vec2 },
+    TowerDestroyed { id: Id, kind: TowerKind, pos: Vec2 },
+    /// Supply has joined the uprising (start of wave `SUPPLY_JOINS_WAVE`).
+    SupplyJoined,
+    /// A rebel picked up equipment at the Supply depot.
+    Equipped { id: Id, pos: Vec2, gun: bool, tools: bool },
+    BarrierPlaced { id: Id, col: i32, row: i32 },
+    BarrierBroken { id: Id, pos: Vec2 },
+    BarrierRemoved { id: Id, refund: u32 },
+    /// IT's server room fell: cameras below Up Top are dark for `seconds`.
+    ItCollapsed { seconds: f32 },
+    ItRestored,
+    /// Main power cut: a whole section (rows `first..=last`) is dark for `seconds`.
+    PowerCut { first: i32, last: i32, seconds: f32 },
     Won,
     Lost,
+}
+
+/// A band of floors with no power: frontends must not show what happens there.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Blackout {
+    pub first: i32,
+    pub last: i32,
+    pub time_left: f32,
 }
 
 /// Running totals, mostly for end screens and for accounting tests.
@@ -167,6 +232,11 @@ pub enum Event {
 pub struct Totals {
     pub kills: u32,
     pub breaches: u32,
+    pub towers_lost: u32,
+    pub barriers_broken: u32,
+    /// Rebels Supply handed guns / tools to.
+    pub armed: u32,
+    pub tooled: u32,
     pub chits_earned: u32,
     pub chits_spent: u32,
     pub chits_refunded: u32,
@@ -183,12 +253,18 @@ pub struct Game {
     tick: u64,
     next_id: Id,
     towers: Vec<Tower>,
+    barriers: Vec<Barrier>,
     enemies: Vec<Enemy>,
     projectiles: Vec<Projectile>,
     spawn_queue: VecDeque<Spawn>,
     spawn_timer: f32,
     events: Vec<Event>,
     totals: Totals,
+    it_hp: f32,
+    /// Seconds until IT is back online (0 = online).
+    it_down: f32,
+    power_timer: f32,
+    blackouts: Vec<Blackout>,
 }
 
 impl Game {
@@ -203,12 +279,17 @@ impl Game {
             tick: 0,
             next_id: 1,
             towers: Vec::new(),
+            barriers: Vec::new(),
             enemies: Vec::new(),
             projectiles: Vec::new(),
             spawn_queue: VecDeque::new(),
             spawn_timer: 0.0,
             events: Vec::new(),
             totals: Totals::default(),
+            it_hp: IT_HP,
+            it_down: 0.0,
+            power_timer: 0.0,
+            blackouts: Vec::new(),
         }
     }
 
@@ -242,6 +323,34 @@ impl Game {
     pub fn towers(&self) -> &[Tower] {
         &self.towers
     }
+    pub fn barriers(&self) -> &[Barrier] {
+        &self.barriers
+    }
+    pub fn barrier(&self, id: Id) -> Option<&Barrier> {
+        self.barriers.iter().find(|b| b.id == id)
+    }
+    pub fn barrier_at(&self, col: i32, row: i32) -> Option<&Barrier> {
+        self.barriers.iter().find(|b| b.col == col && b.row == row)
+    }
+    /// True once Supply hands out guns and tools.
+    pub fn supply_joined(&self) -> bool {
+        self.wave >= SUPPLY_JOINS_WAVE
+    }
+    pub fn can_place_barrier(&self, col: i32, row: i32) -> Result<(), CommandError> {
+        if self.is_over() {
+            return Err(CommandError::GameOver);
+        }
+        if !in_bounds(col, row) {
+            return Err(CommandError::OutOfBounds);
+        }
+        if !self.map.barrier_allowed(col, row) {
+            return Err(CommandError::BarrierNotAllowed);
+        }
+        if self.barrier_at(col, row).is_some() {
+            return Err(CommandError::Occupied);
+        }
+        self.afford(BARRIER_COST)
+    }
     pub fn enemies(&self) -> &[Enemy] {
         &self.enemies
     }
@@ -251,6 +360,30 @@ impl Game {
     pub fn totals(&self) -> &Totals {
         &self.totals
     }
+    pub fn it_hp(&self) -> f32 {
+        self.it_hp
+    }
+    /// Seconds until IT's server room is back online; 0 while it stands.
+    pub fn it_down(&self) -> f32 {
+        self.it_down
+    }
+    /// While IT is down, frontends must not show the Mids or the Down Deep.
+    pub fn cameras_down(&self) -> bool {
+        self.it_down > 0.0
+    }
+    pub fn blackouts(&self) -> &[Blackout] {
+        &self.blackouts
+    }
+    /// True if map row `r` is hidden from the player (power cut, or no cameras there).
+    pub fn is_row_dark(&self, r: i32) -> bool {
+        (self.cameras_down() && r > SECTIONS[0].2)
+            || self.blackouts.iter().any(|b| (b.first..=b.last).contains(&r))
+    }
+    /// True if the player can currently see a world position.
+    pub fn is_visible(&self, p: Vec2) -> bool {
+        !self.is_row_dark(p.y.floor() as i32)
+    }
+
     /// Enemies still waiting to enter the stairwell this wave.
     pub fn pending_spawns(&self) -> usize {
         self.spawn_queue.len()
@@ -289,6 +422,8 @@ impl Game {
             Command::Place { kind, col, row } => self.place(kind, col, row).map(|_| ()),
             Command::Upgrade { tower } => self.upgrade(tower).map(|_| ()),
             Command::Sell { tower } => self.sell(tower).map(|_| ()),
+            Command::PlaceBarrier { col, row } => self.place_barrier(col, row).map(|_| ()),
+            Command::RemoveBarrier { barrier } => self.remove_barrier(barrier).map(|_| ()),
             Command::SendWave => self.send_wave().map(|_| ()),
         }
     }
@@ -309,6 +444,8 @@ impl Game {
             cooldown: 0.0,
             aim: None,
             kills: 0,
+            hp: kind.max_hp(1),
+            max_hp: kind.max_hp(1),
         });
         self.emit(Event::TowerPlaced { id, kind, col, row });
         Ok(id)
@@ -324,6 +461,9 @@ impl Game {
         let t = self.towers.iter_mut().find(|t| t.id == id).unwrap();
         t.level += 1;
         t.invested += cost;
+        let new_max = t.kind.max_hp(t.level);
+        t.hp += new_max - t.max_hp;
+        t.max_hp = new_max;
         let level = t.level;
         self.emit(Event::TowerUpgraded { id, level });
         Ok(level)
@@ -340,6 +480,27 @@ impl Game {
         Ok(refund)
     }
 
+    pub fn place_barrier(&mut self, col: i32, row: i32) -> Result<Id, CommandError> {
+        self.can_place_barrier(col, row)?;
+        let dist = self.map.barrier_dist(col, row).ok_or(CommandError::BarrierNotAllowed)?;
+        self.spend(BARRIER_COST);
+        let id = self.alloc_id();
+        self.barriers.push(Barrier { id, col, row, dist, pos: self.map.pos_at(dist), hp: BARRIER_HP });
+        self.emit(Event::BarrierPlaced { id, col, row });
+        Ok(id)
+    }
+
+    /// Tear a barrier down. Refund scales with its remaining strength.
+    pub fn remove_barrier(&mut self, id: Id) -> Result<u32, CommandError> {
+        self.check_live()?;
+        let idx = self.barriers.iter().position(|b| b.id == id).ok_or(CommandError::NoSuchBarrier)?;
+        let refund = self.barriers.remove(idx).refund();
+        self.chits += refund;
+        self.totals.chits_refunded += refund;
+        self.emit(Event::BarrierRemoved { id, refund });
+        Ok(refund)
+    }
+
     /// Start the next wave. Returns its number.
     pub fn send_wave(&mut self) -> Result<u32, CommandError> {
         self.check_live()?;
@@ -350,7 +511,11 @@ impl Game {
         self.phase = Phase::Wave;
         self.spawn_queue = wave(self.wave).into();
         self.spawn_timer = self.spawn_queue.front().map_or(0.0, |s| s.delay);
+        self.power_timer = self.rng.range_f32(4.0, 10.0);
         self.emit(Event::WaveStarted { wave: self.wave, lore: wave_lore(self.wave) });
+        if self.wave == SUPPLY_JOINS_WAVE {
+            self.emit(Event::SupplyJoined);
+        }
         Ok(self.wave)
     }
 
@@ -368,8 +533,10 @@ impl Game {
             return;
         }
         self.fire_towers();
+        self.rebels_act();
         self.move_projectiles();
         self.collect_dead();
+        self.update_power();
         self.check_wave_end();
     }
 
@@ -413,6 +580,11 @@ impl Game {
             slow: 0.0,
             slow_time: 0.0,
             lane,
+            armed: false,
+            tools: false,
+            supplied: false,
+            blocked: false,
+            gun_cooldown: 0.5,
             last_hit_by: None,
         });
         self.emit(Event::EnemySpawned { id, kind });
@@ -428,7 +600,16 @@ impl Game {
                     e.slow = 0.0;
                 }
             }
-            e.dist = (e.dist + e.effective_speed() * TICK).min(len);
+            let mut next = (e.dist + e.effective_speed() * TICK).min(len);
+            // The first intact barrier ahead stops the climb.
+            e.blocked = false;
+            if let Some(b) = self.barriers.iter().filter(|b| b.dist > e.dist).min_by(|a, b| a.dist.total_cmp(&b.dist))
+                && next >= b.dist - BARRIER_STOP
+            {
+                next = e.dist.max(b.dist - BARRIER_STOP);
+                e.blocked = true;
+            }
+            e.dist = next;
             e.pos = self.map.pos_at(e.dist);
         }
     }
@@ -537,6 +718,128 @@ impl Game {
         }
     }
 
+    /// Gunners shoot the nearest tower in range; everyone near IT's door attacks the server room.
+    fn rebels_act(&mut self) {
+        let it = it_center();
+        let depot = supply_center();
+        let (p_gun, p_tools) = supply_odds(self.wave);
+        let mut it_damage = 0.0;
+        for ei in 0..self.enemies.len() {
+            let e = &mut self.enemies[ei];
+            if e.hp <= 0.0 {
+                continue;
+            }
+            // Supply hands out guns and tools to rebels passing the depot.
+            if !e.supplied && e.pos.distance(depot) <= SUPPLY_REACH {
+                e.supplied = true;
+                if p_gun > 0.0 || p_tools > 0.0 {
+                    let leader = e.kind == EnemyKind::Leader;
+                    let gun = leader || self.rng.range_f32(0.0, 1.0) < p_gun;
+                    let tools = leader || self.rng.range_f32(0.0, 1.0) < p_tools;
+                    let e = &mut self.enemies[ei];
+                    e.armed |= gun;
+                    e.tools |= tools;
+                    if gun || tools {
+                        let (id, pos) = (e.id, e.pos);
+                        self.totals.armed += gun as u32;
+                        self.totals.tooled += tools as u32;
+                        self.emit(Event::Equipped { id, pos, gun, tools });
+                    }
+                }
+            }
+            let e = &mut self.enemies[ei];
+            if self.it_down <= 0.0 && e.pos.distance(it) <= IT_REACH {
+                it_damage += (e.kind.it_dps(self.wave) + if e.armed { 6.0 } else { 0.0 }) * TICK;
+            }
+            if e.blocked {
+                let dmg = barrier_dps(e.tools, self.wave) * TICK;
+                let edist = e.dist;
+                if let Some(b) = self
+                    .barriers
+                    .iter_mut()
+                    .filter(|b| b.dist > edist)
+                    .min_by(|a, b| a.dist.total_cmp(&b.dist))
+                {
+                    b.hp -= dmg;
+                }
+            }
+            let e = &mut self.enemies[ei];
+            if !e.armed {
+                continue;
+            }
+            let gun = rebel_gun(self.wave);
+            e.gun_cooldown = (e.gun_cooldown - TICK).max(0.0);
+            if e.gun_cooldown > 0.0 {
+                continue;
+            }
+            let (eid, epos) = (e.id, e.pos);
+            let target = self
+                .towers
+                .iter()
+                .filter(|t| t.pos.distance(epos) <= gun.range)
+                .min_by(|a, b| a.pos.distance(epos).total_cmp(&b.pos.distance(epos)).then(a.id.cmp(&b.id)))
+                .map(|t| t.id);
+            let Some(tid) = target else { continue };
+            self.enemies[ei].gun_cooldown = gun.cooldown;
+            let ti = self.towers.iter().position(|t| t.id == tid).unwrap();
+            let tpos = self.towers[ti].pos;
+            self.towers[ti].hp -= gun.damage;
+            self.emit(Event::EnemyShot { enemy: eid, tower: tid, from: epos, to: tpos });
+            if self.towers[ti].hp <= 0.0 {
+                let t = self.towers.remove(ti);
+                self.totals.towers_lost += 1;
+                // Shells already in the air still land; they just credit nobody.
+                self.emit(Event::TowerDestroyed { id: t.id, kind: t.kind, pos: t.pos });
+            }
+        }
+        let mut i = 0;
+        while i < self.barriers.len() {
+            if self.barriers[i].hp <= 0.0 {
+                let b = self.barriers.remove(i);
+                self.totals.barriers_broken += 1;
+                self.emit(Event::BarrierBroken { id: b.id, pos: b.pos });
+            } else {
+                i += 1;
+            }
+        }
+        if self.it_down > 0.0 {
+            self.it_down -= TICK;
+            if self.it_down <= 0.0 {
+                self.it_down = 0.0;
+                self.it_hp = IT_HP;
+                self.emit(Event::ItRestored);
+            }
+        } else if it_damage > 0.0 {
+            self.it_hp -= it_damage;
+            if self.it_hp <= 0.0 {
+                self.it_hp = 0.0;
+                self.it_down = IT_DOWN_TIME;
+                self.emit(Event::ItCollapsed { seconds: IT_DOWN_TIME });
+            }
+        }
+    }
+
+    /// Late in the war Mechanical cuts the main power: one whole section of the silo goes dark
+    /// at a time.
+    fn update_power(&mut self) {
+        for b in &mut self.blackouts {
+            b.time_left -= TICK;
+        }
+        self.blackouts.retain(|b| b.time_left > 0.0);
+        if self.wave < POWER_CUT_WAVE || !self.blackouts.is_empty() {
+            return;
+        }
+        self.power_timer -= TICK;
+        if self.power_timer > 0.0 {
+            return;
+        }
+        self.power_timer = self.rng.range_f32(8.0, 16.0);
+        let (_, first, last) = SECTIONS[self.rng.below(SECTIONS.len())];
+        let seconds = self.rng.range_f32(8.0, 12.0);
+        self.blackouts.push(Blackout { first, last, time_left: seconds });
+        self.emit(Event::PowerCut { first, last, seconds });
+    }
+
     fn move_projectiles(&mut self) {
         let mut i = 0;
         while i < self.projectiles.len() {
@@ -597,6 +900,19 @@ impl Game {
             return;
         }
         self.projectiles.clear();
+        // Between waves IT repairs everything and the power comes back.
+        self.blackouts.clear();
+        for t in &mut self.towers {
+            t.hp = t.max_hp;
+        }
+        if self.it_down > 0.0 || self.it_hp < IT_HP {
+            let was_down = self.it_down > 0.0;
+            self.it_down = 0.0;
+            self.it_hp = IT_HP;
+            if was_down {
+                self.emit(Event::ItRestored);
+            }
+        }
         if self.wave >= MAX_WAVES {
             self.phase = Phase::Won;
             self.emit(Event::Won);
@@ -667,6 +983,7 @@ impl Game {
             mix(((t.col as u64) << 32) | t.row as u32 as u64);
             mix(t.level as u64);
             mix(t.cooldown.to_bits() as u64);
+            mix(t.hp.to_bits() as u64);
         }
         for e in &self.enemies {
             mix(e.id as u64);
@@ -675,6 +992,19 @@ impl Game {
             mix(e.slow.to_bits() as u64);
             mix(e.slow_time.to_bits() as u64);
             mix(e.lane.to_bits() as u64);
+            mix(e.gun_cooldown.to_bits() as u64);
+            mix(e.armed as u64 | (e.tools as u64) << 1 | (e.supplied as u64) << 2 | (e.blocked as u64) << 3);
+        }
+        for b in &self.barriers {
+            mix(b.id as u64);
+            mix(b.hp.to_bits() as u64);
+        }
+        mix(self.it_hp.to_bits() as u64);
+        mix(self.it_down.to_bits() as u64);
+        mix(self.power_timer.to_bits() as u64);
+        for b in &self.blackouts {
+            mix(((b.first as u64) << 32) | b.last as u32 as u64);
+            mix(b.time_left.to_bits() as u64);
         }
         for p in &self.projectiles {
             mix(p.id as u64);
@@ -718,6 +1048,9 @@ impl Game {
             if !(1..=MAX_TOWER_LEVEL).contains(&tw.level) || !tw.cooldown.is_finite() || tw.cooldown < 0.0 {
                 return Err(format!("tower {} bad state {:?}", tw.id, tw));
             }
+            if !(tw.hp > 0.0 && tw.hp <= tw.max_hp + 1e-3) || tw.max_hp != tw.kind.max_hp(tw.level) {
+                return Err(format!("tower {} hp {} / {}", tw.id, tw.hp, tw.max_hp));
+            }
         }
         for e in &self.enemies {
             if !(e.hp > 0.0 && e.hp <= e.max_hp) {
@@ -728,6 +1061,25 @@ impl Game {
             }
             if !(0.0..1.0).contains(&e.slow) || e.slow_time < 0.0 {
                 return Err(format!("enemy {} slow {} for {}", e.id, e.slow, e.slow_time));
+            }
+        }
+        for (i, b) in self.barriers.iter().enumerate() {
+            if !self.map.barrier_allowed(b.col, b.row) || !(b.hp > 0.0 && b.hp <= BARRIER_HP) {
+                return Err(format!("bad barrier {b:?}"));
+            }
+            if self.barriers[i + 1..].iter().any(|o| (o.col, o.row) == (b.col, b.row)) {
+                return Err(format!("two barriers at ({},{})", b.col, b.row));
+            }
+        }
+        if !(0.0..=IT_HP).contains(&self.it_hp) || self.it_down < 0.0 || (self.it_down > 0.0) != (self.it_hp == 0.0) {
+            return Err(format!("IT hp {} down {}", self.it_hp, self.it_down));
+        }
+        if self.phase != Phase::Wave && !self.blackouts.is_empty() && self.phase != Phase::Lost {
+            return Err("blackout outside a wave".into());
+        }
+        for b in &self.blackouts {
+            if !(1 <= b.first && b.first <= b.last && b.last < ROWS) || b.time_left <= 0.0 {
+                return Err(format!("bad blackout {b:?}"));
             }
         }
         if self.enemies.windows(2).any(|w| w[0].id >= w[1].id) {

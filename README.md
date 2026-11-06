@@ -21,8 +21,26 @@ cargo run --release -p silo_gfx   # graphical (desktop)
 cargo run --release -p silo_tui   # terminal, needs at least 90x29
 ```
 
-Controls (both): `1-4` pick tower, click/tap to build or select, `U` upgrade, `X` sell,
+Controls (both): `1-4` pick tower, `5` barrier, click/tap to build or select, `U` upgrade, `X` sell,
 `N`/Space send wave, `F` speed, `P` pause, `T` autopilot, `Esc` deselect.
+
+The silo is three sections tall (Up Top, Mids, Down Deep); the field shows one at a time.
+Roll the view with `W`/`S`/arrows/PageUp/PageDown, the mouse wheel, or by dragging the field
+(GUI); `PgUp`/`PgDn`, `[`/`]` or the wheel (TUI). The GUI minimap on the right wall shows the
+whole silo and every rebel; the arrows pulse red with a count when rebels are out of sight.
+
+Threats beyond the stair:
+- **IT's server room** (level ~33). Rebels passing its door attack it. If it falls, IT loses
+  the cameras below Up Top (Mids and Down Deep go black) for 25s; it reboots and is repaired
+  between waves.
+- **Supply joins the uprising** (wave 6+). Rebels passing the Supply depot (level ~101) are
+  handed guns (they shoot the nearest tower) and breaching tools (they smash barriers). The
+  share grows every wave; kill them below Supply to keep them unarmed. Towers have HP, are lost
+  at 0, and are repaired between waves.
+- **Barriers** (`5`/`B`, 40 chits): barricades on the stair, only above Supply. Rebels stop and
+  must break them; bare hands take ages, tools from Supply take seconds. `X` removes one.
+- **Main power cuts** (wave 15+). Mechanical blacks out one whole section at a time; you can't
+  see the rebels in it.
 
 ## Platforms (silo_gfx)
 
@@ -58,4 +76,6 @@ cargo run --release -p silo_core --example balance    # win rates of different b
 cargo run --release -p silo_core --example trace      # wave-by-wave bot game
 cargo run -p silo_core --example map_dump             # tile layout
 SILO_SHOT=shot.png SILO_SHOT_FRAME=900 cargo run --release -p silo_gfx   # autoplay screenshot
+#   SILO_SHOT_VIEW=0|1|2 picks the section, SILO_SHOT_SKIP=N lets the AI play N waves first,
+#   SILO_SHOT_BARRIERS=1 builds a few barriers in Mids, SILO_SHOT_NOAI=1 leaves the silo undefended
 ```

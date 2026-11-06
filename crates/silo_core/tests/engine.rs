@@ -28,22 +28,22 @@ fn initial_state() {
 #[test]
 fn placement_rules() {
     let mut g = Game::new(0);
-    assert_eq!(g.place(TowerKind::Deputy, 7, 11), Err(CommandError::NotBuildable)); // stairs
+    assert_eq!(g.place(TowerKind::Deputy, 7, 35), Err(CommandError::NotBuildable)); // stairs
     assert_eq!(g.place(TowerKind::Deputy, 5, 0), Err(CommandError::NotBuildable)); // airlock
     assert_eq!(g.place(TowerKind::Deputy, 2, 0), Err(CommandError::NotBuildable)); // outside
     assert_eq!(g.place(TowerKind::Deputy, 0, 5), Err(CommandError::NotBuildable)); // rock wall
     assert_eq!(g.place(TowerKind::Deputy, -1, 3), Err(CommandError::OutOfBounds));
-    assert_eq!(g.place(TowerKind::Deputy, 3, 13), Err(CommandError::OutOfBounds));
+    assert_eq!(g.place(TowerKind::Deputy, 3, 37), Err(CommandError::OutOfBounds));
 
-    let id = g.place(TowerKind::Deputy, 4, 10).unwrap();
+    let id = g.place(TowerKind::Deputy, 4, 34).unwrap();
     assert_eq!(g.chits(), START_CHITS - 50);
-    assert_eq!(g.tower_at(4, 10).unwrap().id, id);
-    assert_eq!(g.place(TowerKind::Jammer, 4, 10), Err(CommandError::Occupied));
+    assert_eq!(g.tower_at(4, 34).unwrap().id, id);
+    assert_eq!(g.place(TowerKind::Jammer, 4, 34), Err(CommandError::Occupied));
 
-    g.place(TowerKind::Deputy, 5, 10).unwrap();
+    g.place(TowerKind::Deputy, 5, 34).unwrap();
     // 50 left; Gas costs 100.
     assert_eq!(
-        g.place(TowerKind::Gas, 2, 10),
+        g.place(TowerKind::Gas, 2, 34),
         Err(CommandError::NotEnoughChits { need: 100, have: 50 })
     );
     assert_eq!(g.chits(), 50, "failed command must not charge");
@@ -53,7 +53,7 @@ fn placement_rules() {
 #[test]
 fn upgrade_and_sell() {
     let mut g = Game::new(0);
-    let id = g.place(TowerKind::Deputy, 4, 10).unwrap(); // 100 left
+    let id = g.place(TowerKind::Deputy, 4, 34).unwrap(); // 100 left
     let c1 = TowerKind::Deputy.upgrade_cost(1).unwrap(); // 40
     assert_eq!(g.upgrade(id), Ok(2));
     assert_eq!(g.chits(), 100 - c1);
@@ -68,18 +68,21 @@ fn upgrade_and_sell() {
     let refund = g.sell(id).unwrap();
     assert_eq!(refund, (invested as f32 * SELL_REFUND).floor() as u32);
     assert_eq!(g.chits(), before + refund);
-    assert!(g.tower_at(4, 10).is_none());
+    assert!(g.tower_at(4, 34).is_none());
     assert_eq!(g.sell(id), Err(CommandError::NoSuchTower));
     assert_eq!(g.upgrade(id), Err(CommandError::NoSuchTower));
     // Tile is free again.
-    g.place(TowerKind::Deputy, 4, 10).unwrap();
+    g.place(TowerKind::Deputy, 4, 34).unwrap();
     g.validate().unwrap();
 }
 
 #[test]
 fn max_level() {
     let mut g = Game::new(0);
-    let id = g.place(TowerKind::Deputy, 4, 10).unwrap();
+    let id = g.place(TowerKind::Deputy, 4, 34).unwrap();
+    // Two helpers so the silo survives long enough to save up.
+    g.place(TowerKind::Deputy, 4, 35).unwrap();
+    g.place(TowerKind::Deputy, 5, 34).unwrap();
     // Earn money by surviving waves undefended-ish isn't reliable; use a rich bot run instead:
     // cheaper to just verify via repeated sells/places is impossible, so play waves.
     while g.chits() < 200 {
@@ -98,7 +101,7 @@ fn send_wave_rules() {
     assert_eq!(g.phase(), Phase::Wave);
     assert_eq!(g.send_wave(), Err(CommandError::WaveInProgress));
     // Building during a wave is allowed.
-    g.place(TowerKind::Deputy, 4, 10).unwrap();
+    g.place(TowerKind::Deputy, 4, 34).unwrap();
 }
 
 #[test]
@@ -131,8 +134,8 @@ fn undefended_wave_one_breaches_exactly() {
     assert_eq!(g.seals(), START_SEALS - porters);
     assert_eq!(g.phase(), Phase::Building);
     assert_eq!(g.chits(), START_CHITS + wave_bonus(1));
-    // Crossing time sanity: path ~34 tiles at 0.95 t/s ~= 36s for the fastest rebels.
-    assert!(g.time() > 30.0 && g.time() < 60.0, "wave took {}s", g.time());
+    // Crossing time sanity: path ~105 tiles at 1.14 t/s ~= 92s for the fastest rebels.
+    assert!(g.time() > 75.0 && g.time() < 130.0, "wave took {}s", g.time());
 }
 
 #[test]
@@ -152,7 +155,7 @@ fn undefended_silo_falls() {
     assert!(g.wave() <= 3, "undefended silo survived to wave {}", g.wave());
     // Game over: every command refused, step does nothing.
     assert_eq!(g.send_wave(), Err(CommandError::GameOver));
-    assert_eq!(g.place(TowerKind::Deputy, 4, 10), Err(CommandError::GameOver));
+    assert_eq!(g.place(TowerKind::Deputy, 4, 34), Err(CommandError::GameOver));
     let h = g.state_hash();
     g.step();
     assert_eq!(g.state_hash(), h);
@@ -162,8 +165,8 @@ fn undefended_silo_falls() {
 fn deputies_kill_porters_and_earn_bounty() {
     let mut g = Game::new(0);
     // Cover the first landing from both sides.
-    g.place(TowerKind::Deputy, 4, 11).unwrap();
-    g.place(TowerKind::Deputy, 5, 10).unwrap();
+    g.place(TowerKind::Deputy, 4, 35).unwrap();
+    g.place(TowerKind::Deputy, 5, 34).unwrap();
     g.send_wave().unwrap();
     g.run_wave(WAVE_CAP);
     let t = g.totals();
@@ -179,7 +182,7 @@ fn jammer_slows_enemies() {
     let travel = |with_jammer: bool| -> f32 {
         let mut g = Game::new(0);
         if with_jammer {
-            g.place(TowerKind::Jammer, 2, 12).unwrap();
+            g.place(TowerKind::Jammer, 2, 36).unwrap();
         }
         g.send_wave().unwrap();
         let mut slowed = false;
@@ -198,7 +201,7 @@ fn jammer_slows_enemies() {
 #[test]
 fn gas_splash_hits_multiple() {
     let mut g = Game::new(0);
-    g.place(TowerKind::Gas, 4, 10).unwrap();
+    g.place(TowerKind::Gas, 4, 34).unwrap();
     g.send_wave().unwrap();
     let mut max_hit_by_one_blast = 0;
     while g.phase() == Phase::Wave {
@@ -220,8 +223,8 @@ fn gas_splash_hits_multiple() {
 fn marksman_pierces_armor() {
     // Wave 4 brings armored miners. Survive to it with deputies, then add a marksman.
     let mut g = Game::new(0);
-    g.place(TowerKind::Deputy, 4, 11).unwrap();
-    g.place(TowerKind::Deputy, 5, 10).unwrap();
+    g.place(TowerKind::Deputy, 4, 35).unwrap();
+    g.place(TowerKind::Deputy, 5, 34).unwrap();
     for _ in 0..3 {
         g.send_wave().unwrap();
         g.run_wave(WAVE_CAP);
@@ -255,7 +258,7 @@ fn marksman_pierces_armor() {
 #[test]
 fn selling_tower_mid_flight_is_safe() {
     let mut g = Game::new(3);
-    let id = g.place(TowerKind::Deputy, 2, 10).unwrap();
+    let id = g.place(TowerKind::Deputy, 2, 34).unwrap();
     g.send_wave().unwrap();
     while g.projectiles().is_empty() && g.phase() == Phase::Wave {
         g.step();
@@ -291,7 +294,7 @@ fn same_seed_same_game() {
 #[test]
 fn clone_is_independent_snapshot() {
     let mut g = Game::new(5);
-    g.place(TowerKind::Deputy, 4, 11).unwrap();
+    g.place(TowerKind::Deputy, 4, 35).unwrap();
     g.send_wave().unwrap();
     for _ in 0..200 {
         g.step();
@@ -316,11 +319,18 @@ fn fuzz_random_commands() {
         let mut ticks = 0u64;
         while !g.is_over() && ticks < 30 * 60 * 40 {
             if r.below(20) == 0 || g.phase() == Phase::Building {
-                let cmd = match r.below(6) {
+                let cmd = match r.below(7) {
                     0 | 1 => Command::Place {
                         kind: TowerKind::ALL[r.below(4)],
                         col: r.below(12) as i32 - 1,
-                        row: r.below(14) as i32 - 1,
+                        row: r.below(map::ROWS as usize + 2) as i32 - 1,
+                    },
+                    4 if r.below(3) == 0 => Command::PlaceBarrier {
+                        col: r.below(12) as i32 - 1,
+                        row: r.below(map::ROWS as usize + 2) as i32 - 1,
+                    },
+                    4 => Command::RemoveBarrier {
+                        barrier: g.barriers().get(r.below(g.barriers().len().max(1))).map_or(0, |b| b.id),
                     },
                     2 => Command::Upgrade { tower: r.below(g.towers().len() + 3) as u32 },
                     3 if r.below(4) == 0 => Command::Sell {
@@ -414,4 +424,228 @@ fn fuzz_late_game_chaos() {
         max_wave = max_wave.max(g.wave());
     }
     assert!(max_wave >= 12, "chaos fuzz never reached late game (max wave {max_wave})");
+}
+
+// ---------------------------------------------------------------- IT, guns and power
+
+/// Play waves with the balanced bot until `wave` waves are done.
+fn bot_game_until(seed: u64, wave: u32) -> (Game, Bot) {
+    let mut g = Game::new(seed);
+    let mut bot = Bot::balanced(g.map());
+    while g.wave() < wave && !g.is_over() {
+        bot.take_turn(&mut g);
+        g.run_wave(WAVE_CAP);
+        g.drain_events();
+    }
+    (g, bot)
+}
+
+#[test]
+fn supply_arms_rebels_only_after_joining() {
+    assert_eq!(supply_odds(SUPPLY_JOINS_WAVE - 1), (0.0, 0.0));
+    let (g6, t6) = supply_odds(SUPPLY_JOINS_WAVE);
+    let (g20, t20) = supply_odds(MAX_WAVES);
+    assert!(g6 > 0.0 && t6 > 0.0 && g20 > g6 && t20 > t6, "Supply gives more as the war goes on");
+
+    let mut g = Game::new(4);
+    let mut bot = Bot::balanced(g.map());
+    let mut joined = 0;
+    let mut equipped = 0;
+    while g.wave() < SUPPLY_JOINS_WAVE + 4 && !g.is_over() {
+        bot.take_turn(&mut g);
+        while g.phase() == Phase::Wave {
+            step_checked(&mut g);
+            for e in g.drain_events() {
+                match e {
+                    Event::SupplyJoined => {
+                        joined += 1;
+                        assert_eq!(g.wave(), SUPPLY_JOINS_WAVE);
+                    }
+                    Event::Equipped { id, pos, gun, tools } => {
+                        equipped += 1;
+                        assert!(g.wave() >= SUPPLY_JOINS_WAVE, "armed before Supply joined");
+                        assert!(gun || tools);
+                        assert!(pos.distance(map::supply_center()) <= map::SUPPLY_REACH + 1e-4, "equipped away from depot");
+                        let e = g.enemies().iter().find(|e| e.id == id).unwrap();
+                        assert_eq!((e.armed, e.tools), (e.armed || gun, e.tools || tools));
+                    }
+                    _ => {}
+                }
+            }
+            // Nobody below the depot carries anything.
+            for e in g.enemies() {
+                if !e.supplied {
+                    assert!(!e.armed && !e.tools);
+                }
+            }
+        }
+    }
+    assert_eq!(joined, 1);
+    assert!(equipped > 5, "only {equipped} rebels equipped");
+    assert!(g.totals().armed + g.totals().tooled >= equipped);
+}
+
+#[test]
+fn armed_rebels_shoot_towers_and_towers_are_repaired() {
+    let (mut g, _) = bot_game_until(3, MAX_WAVES - 2);
+    assert!(!g.is_over());
+    g.send_wave().unwrap();
+    let (mut shots, mut destroyed) = (0, 0);
+    let lost_before = g.totals().towers_lost;
+    while g.phase() == Phase::Wave {
+        step_checked(&mut g);
+        for e in g.drain_events() {
+            match e {
+                Event::EnemyShot { enemy, from, to, .. } => {
+                    shots += 1;
+                    assert!(from.distance(to) <= rebel_gun(g.wave()).range + 1e-4);
+                    if let Some(e) = g.enemies().iter().find(|e| e.id == enemy) {
+                        assert!(e.armed, "unarmed rebel fired");
+                    }
+                }
+                Event::TowerDestroyed { .. } => destroyed += 1,
+                _ => {}
+            }
+        }
+    }
+    assert!(shots > 0, "armed rebels never fired");
+    assert_eq!(lost_before + destroyed, g.totals().towers_lost);
+    assert!(g.towers().iter().all(|t| t.hp == t.max_hp), "towers repaired between waves");
+}
+
+#[test]
+fn barrier_rules() {
+    let mut g = Game::new(0);
+    let supply_row = map::SUPPLY_ROOM[0].1;
+    // Find stair tiles above and below Supply.
+    let spot = |above: bool| {
+        (1..map::ROWS)
+            .filter(|&r| (r < supply_row) == above)
+            .flat_map(|r| (0..map::COLS).map(move |c| (c, r)))
+            .find(|&(c, r)| g.map().tile(c, r) == Tile::Stairs)
+            .unwrap()
+    };
+    let below = spot(false);
+    assert_eq!(g.place_barrier(below.0, below.1), Err(CommandError::BarrierNotAllowed));
+    assert_eq!(g.place_barrier(2, 20), Err(CommandError::BarrierNotAllowed), "floor, not stair");
+    assert_eq!(g.place_barrier(-1, 3), Err(CommandError::OutOfBounds));
+    let (c, r) = (4, 20);
+    assert_eq!(g.map().tile(c, r), Tile::Stairs);
+    let id = g.place_barrier(c, r).unwrap();
+    assert_eq!(g.chits(), START_CHITS - BARRIER_COST);
+    assert_eq!(g.place_barrier(c, r), Err(CommandError::Occupied));
+    assert_eq!(g.place(TowerKind::Deputy, c, r), Err(CommandError::NotBuildable));
+    let refund = g.remove_barrier(id).unwrap();
+    assert_eq!(refund, (BARRIER_COST as f32 * SELL_REFUND) as u32);
+    assert_eq!(g.remove_barrier(id), Err(CommandError::NoSuchBarrier));
+    g.validate().unwrap();
+}
+
+#[test]
+fn barrier_holds_rebels_until_broken() {
+    let mut g = Game::new(0);
+    let id = g.place_barrier(4, 20).unwrap();
+    let wall = g.barrier(id).unwrap().dist;
+    g.send_wave().unwrap();
+    let mut blocked_seen = false;
+    let mut broken_at = None;
+    while g.phase() == Phase::Wave {
+        let before: Vec<(u32, f32)> = g.enemies().iter().map(|e| (e.id, e.dist)).collect();
+        step_checked(&mut g);
+        let intact = g.barrier(id).is_some();
+        for e in g.enemies() {
+            if let Some(&(_, d0)) = before.iter().find(|(i, _)| *i == e.id)
+                && d0 < wall
+                && intact
+            {
+                assert!(e.dist < wall, "rebel {} walked through an intact barrier", e.id);
+            }
+            blocked_seen |= e.blocked;
+        }
+        for ev in g.drain_events() {
+            if let Event::BarrierBroken { id: b, .. } = ev {
+                assert_eq!(b, id);
+                broken_at = Some(g.time());
+            }
+        }
+    }
+    assert!(blocked_seen, "nobody was stopped");
+    // Wave 1 rebels have no tools: bare hands take a while, but they get through eventually.
+    let t = broken_at.expect("bare hands never broke the barrier");
+    assert!(t > 20.0, "broke the barrier too fast with bare hands: {t}s");
+    assert_eq!(g.totals().barriers_broken, 1);
+}
+
+#[test]
+fn tools_break_barriers_much_faster_than_fists() {
+    assert!(barrier_dps(true, 6) >= barrier_dps(false, 6) * 5.0);
+    assert!(BARRIER_HP / barrier_dps(true, 10) < 8.0, "a tooled rebel breaks a barrier in seconds");
+}
+
+#[test]
+fn it_collapse_blinds_lower_cameras_until_reboot() {
+    let mut g = Game::new(0);
+    let mut collapsed_at = None;
+    let mut restored = false;
+    while !g.is_over() {
+        g.send_wave().unwrap();
+        while g.phase() == Phase::Wave {
+            step_checked(&mut g);
+            for e in g.drain_events() {
+                match e {
+                    Event::ItCollapsed { seconds } => {
+                        assert_eq!(seconds, IT_DOWN_TIME);
+                        collapsed_at = Some(g.time());
+                        assert!(g.cameras_down());
+                        assert_eq!(g.it_hp(), 0.0);
+                        assert!(g.is_row_dark(map::SECTIONS[1].1) && g.is_row_dark(map::ROWS - 1));
+                        assert!(!g.is_row_dark(map::SECTIONS[0].2), "Up Top is still watched");
+                    }
+                    Event::ItRestored => {
+                        restored = true;
+                        assert!(!g.cameras_down());
+                        assert_eq!(g.it_hp(), IT_HP);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if g.phase() == Phase::Building {
+            assert!(!g.cameras_down() && g.it_hp() == IT_HP, "IT rebooted between waves");
+        }
+    }
+    let t = collapsed_at.expect("undefended IT never collapsed");
+    assert!(restored || g.phase() == Phase::Lost, "collapsed at {t}s, never restored");
+}
+
+#[test]
+fn power_cuts_only_in_final_waves_and_lift_between_waves() {
+    let mut g = Game::new(9);
+    let mut bot = Bot::balanced(g.map());
+    let mut cuts = 0;
+    while !g.is_over() {
+        bot.take_turn(&mut g);
+        while g.phase() == Phase::Wave {
+            step_checked(&mut g);
+            for e in g.drain_events() {
+                if let Event::PowerCut { first, last, seconds } = e {
+                    cuts += 1;
+                    assert!(g.wave() >= POWER_CUT_WAVE, "power cut in wave {}", g.wave());
+                    assert!(seconds > 0.0 && first <= last);
+                    if g.phase() == Phase::Wave {
+                        assert!((first..=last).all(|r| g.is_row_dark(r)));
+                    }
+                    assert!(map::SECTIONS.iter().any(|s| (s.1, s.2) == (first, last)), "cut a whole section");
+                    assert!(g.blackouts().len() <= 1, "one section at a time");
+                }
+            }
+            if g.wave() < POWER_CUT_WAVE {
+                assert!(g.blackouts().is_empty());
+            }
+        }
+        if g.phase() != Phase::Lost {
+            assert!(g.blackouts().is_empty(), "power restored after the wave");
+        }
+    }
+    assert!(g.wave() < POWER_CUT_WAVE || cuts > 0, "no power cuts in the final waves");
 }
