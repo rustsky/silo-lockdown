@@ -59,36 +59,55 @@ pub fn waypoints() -> Vec<Vec2> {
 /// The airlock door spans these two surface tiles.
 pub const AIRLOCK: [(i32, i32); 2] = [(5, 0), (6, 0)];
 
-/// IT's server room: two tiles on level ~33, right where a stair landing meets the wall.
+/// IT's server hall: two floors (levels ~29-36) beside the stair, left of the shaft.
 /// Rebels passing within `IT_REACH` of its centre attack it.
-pub const IT_ROOM: [(i32, i32); 2] = [(1, 9), (2, 9)];
+pub const IT_ROOM: [(i32, i32); 4] = [(1, 8), (2, 8), (1, 9), (2, 9)];
 pub const IT_REACH: f32 = 2.0;
 
 pub fn it_center() -> Vec2 {
-    vec2(2.0, 9.5)
+    vec2(2.0, 9.0)
 }
 
-/// The Supply depot in the Down Deep. Once Supply joins the uprising, rebels passing within
+/// The Supply depot in the Down Deep (two floors, right of the shaft). Once Supply joins the uprising, rebels passing within
 /// `SUPPLY_REACH` of it are handed guns and tools. Barriers may only be built above it.
-pub const SUPPLY_ROOM: [(i32, i32); 2] = [(9, 26), (10, 26)];
+pub const SUPPLY_ROOM: [(i32, i32); 4] = [(9, 26), (10, 26), (9, 27), (10, 27)];
 pub const SUPPLY_REACH: f32 = 2.0;
 
 pub fn supply_center() -> Vec2 {
-    vec2(10.0, 26.5)
+    vec2(10.0, 27.0)
 }
 
-/// Named places marked on the right wall (row, name). Level numbers come from `level_of_row`.
-pub const PLAQUES: &[(i32, &str)] = &[
-    (2, "IT"),
-    (6, "CAFE"),
-    (10, "SCHOOL"),
-    (14, "MARKET"),
-    (18, "FARMS"),
-    (22, "HYDRO"),
-    (26, "SUPPLY"),
-    (30, "DEEP"),
-    (34, "MECH"),
+/// What each level of the silo is used for: (first row, last row, left side, right side).
+/// Covers every underground row exactly once; IT and Supply sit where their rooms are.
+pub const FACILITIES: &[(i32, i32, &str, &str)] = &[
+    // Up Top
+    (1, 2, "CAFETERIA", "CAFETERIA"),
+    (3, 4, "MAYOR", "SHERIFF"),
+    (5, 6, "QUARTERS", "QUARTERS"),
+    (7, 7, "SCHOOL", "SCHOOL"),
+    (8, 9, "IT", "IT OFFICES"),
+    (10, 12, "HOSPITAL", "QUARTERS"),
+    // Mids
+    (13, 14, "MARKET", "MARKET"),
+    (15, 18, "FARMS", "FARMS"),
+    (19, 20, "CLINIC", "QUARTERS"),
+    (21, 22, "WATER WORKS", "WATER WORKS"),
+    (23, 24, "SCHOOL", "QUARTERS"),
+    // Down Deep
+    (25, 25, "WORKSHOP", "WORKSHOP"),
+    (26, 28, "WORKSHOP", "SUPPLY"),
+    (29, 31, "POWER PLANT", "POWER PLANT"),
+    (32, 33, "PUMPS", "STORES"),
+    (34, 36, "MINE", "MECHANICAL"),
 ];
+
+/// The facility a tile belongs to (by row and side of the shaft), if any.
+pub fn facility_at(c: i32, r: i32) -> Option<&'static str> {
+    FACILITIES
+        .iter()
+        .find(|f| (f.0..=f.1).contains(&r))
+        .map(|f| if (c as f32) < PILLAR_X { f.2 } else { f.3 })
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tile {
@@ -340,6 +359,16 @@ mod tests {
             }
         }
         assert!(n > 40, "only {n} barrier spots");
+        // Every underground row has a facility on both sides, in order, without overlaps.
+        let mut next = 1;
+        for f in FACILITIES {
+            assert_eq!(f.0, next, "gap or overlap before {f:?}");
+            assert!(f.1 >= f.0);
+            next = f.1 + 1;
+        }
+        assert_eq!(next, ROWS);
+        assert_eq!(facility_at(1, IT_ROOM[0].1), Some("IT"));
+        assert_eq!(facility_at(10, SUPPLY_ROOM[0].1), Some("SUPPLY"));
         assert_eq!(section_of_row(0), 0);
         assert_eq!(section_of_row(13), 1);
         assert_eq!(section_of_row(36), 2);

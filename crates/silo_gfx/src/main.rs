@@ -3,6 +3,7 @@
 
 mod app;
 mod fx;
+mod light;
 mod render;
 mod ui;
 

@@ -1,6 +1,7 @@
 //! Game loop glue: input, fixed-step simulation, events -> effects, HUD and command panel.
 
-use crate::fx::{Fx, Kind};
+use crate::fx::{Fx, Kind, PKind};
+use crate::light::Lighting;
 use crate::render::{self, *};
 use crate::ui::*;
 use macroquad::prelude::*;
@@ -76,6 +77,7 @@ pub struct App {
     /// Wave whose first power cut was announced (later cuts that wave stay quiet).
     power_announced: u32,
     decor: Decor,
+    light: Lighting,
     /// Screenshot mode (SILO_SHOT=path.png): autoplay and capture after N frames.
     shot: Option<(String, u32)>,
     frame: u32,
@@ -121,6 +123,7 @@ impl App {
             banner: None,
             power_announced: 0,
             decor,
+            light: Lighting::new(),
             shot,
             frame: 0,
             quit: false,
@@ -208,7 +211,9 @@ impl App {
             ..Default::default()
         };
         let pointer = cam.screen_to_world(mouse_position().into());
-        let tap = is_mouse_button_pressed(MouseButton::Left).then_some(pointer);
+        let tap = is_mouse_button_pressed(MouseButton::Left)
+            .then_some(pointer)
+            .filter(|_| self.shot.is_none());
         let mut ui = Ui {
             pointer,
             tap,
@@ -238,9 +243,42 @@ impl App {
 
         clear_background(rgb(8, 8, 10));
         set_camera(&world_cam);
-        render::world(&self.game, &self.decor, self.time, self.fx.red_flash);
-        self.field_overlays(&ui, world_pointer);
+        let vis = Vis {
+            y0: self.scroll + HUD_H,
+            y1: self.scroll + PANEL_Y,
+        };
+        render::world(
+            &self.game,
+            &self.decor,
+            self.time,
+            self.fx.red_flash,
+            &mut self.light,
+            vis,
+        );
+        // Light the scene. Nothing shines out of rooms IT can't see.
+        self.fx.lights(&mut self.light);
+        let g = &self.game;
+        self.light.lights.retain(|l| {
+            vis.contains(l.pos.y, l.radius)
+                && (l.pos.y < HUD_H + TILE
+                    || g.is_visible(sc::vec2(l.pos.x / TILE, (l.pos.y - HUD_H) / TILE)))
+        });
+        self.light.cones.retain(|c| {
+            vis.contains(c.apex.y, c.height)
+                && g.is_visible(sc::vec2(c.apex.x / TILE, (c.apex.y - HUD_H) / TILE))
+        });
+        let view = Rect::new(W / 2.0 - vw / 2.0, H / 2.0 - vh / 2.0, vw, vh);
+        let field = Rect::new(0.0, HUD_H, W, FIELD_H);
+        self.light.apply(
+            &world_cam,
+            &cam,
+            view,
+            field,
+            Color::new(0.3, 0.31, 0.38, 1.0),
+        );
+        set_camera(&world_cam);
         self.fx.draw();
+        self.field_overlays(&ui, world_pointer);
         render::darkness(&self.game, self.time);
         set_camera(&cam);
         // The world is taller than the field: cover what spills over the HUD and panel.
@@ -347,6 +385,13 @@ impl App {
         for ev in self.game.drain_events() {
             self.on_event(ev);
         }
+        // Sledgehammers on barricades throw sparks.
+        for e in self.game.enemies().iter().filter(|e| e.blocked && e.tools) {
+            if rand::gen_range(0.0, 1.0) < dt * 4.0 {
+                let p = px(e.pos) + vec2(rand::gen_range(-8.0, 8.0), -22.0);
+                self.fx.burst(PKind::Spark, p, 4, 140.0, rgb(255, 210, 140));
+            }
+        }
     }
 
     fn on_event(&mut self, ev: Event) {
@@ -380,6 +425,13 @@ impl App {
             } => {
                 let p = px(pos);
                 self.fx.add(p - vec2(0.0, 10.0), 0.5, Kind::Puff);
+                self.fx.burst(
+                    PKind::Debris,
+                    p - vec2(0.0, 14.0),
+                    5,
+                    110.0,
+                    rgb(120, 100, 80),
+                );
                 self.fx.add(
                     p - vec2(0.0, 20.0),
                     0.9,
@@ -397,7 +449,24 @@ impl App {
                 }
             }
             Event::Explosion { pos, radius } => {
-                self.fx.add(px(pos), 0.8, Kind::Cloud { r: radius * TILE })
+                self.fx.add(px(pos), 0.8, Kind::Cloud { r: radius * TILE });
+                self.fx
+                    .burst(PKind::Ember, px(pos), 10, 120.0, rgb(170, 255, 120));
+            }
+            Event::Shot {
+                kind: TowerKind::Deputy,
+                from,
+                to,
+                ..
+            } => {
+                // Brass casing flicked out sideways.
+                let p = px(from);
+                let side = if to.x > from.x { -1.0 } else { 1.0 };
+                let v = vec2(
+                    side * rand::gen_range(40.0, 90.0),
+                    rand::gen_range(-170.0, -110.0),
+                );
+                self.fx.particle(PKind::Casing, p, v, 0.7, WHITE);
             }
             Event::Pulse { pos, radius, .. } => self.fx.add(
                 px(pos),
@@ -414,12 +483,16 @@ impl App {
                 ..
             } => self.fx.add(px(from), 0.18, Kind::Tracer { to: px(to) }),
             Event::EnemyShot { from, to, .. } => {
-                self.fx.add(px(from), 0.15, Kind::Tracer { to: px(to) })
+                self.fx.add(px(from), 0.15, Kind::Tracer { to: px(to) });
+                self.fx
+                    .burst(PKind::Spark, px(to), 6, 160.0, rgb(255, 200, 120));
             }
             Event::TowerDestroyed { kind, pos, .. } => {
                 let p = px(pos);
                 self.fx.shake = self.fx.shake.max(0.2);
                 self.fx.add(p, 0.6, Kind::Puff);
+                self.fx.burst(PKind::Spark, p, 18, 260.0, rgb(255, 180, 90));
+                self.fx.burst(PKind::Debris, p, 12, 180.0, rgb(90, 94, 100));
                 self.fx.add(
                     p,
                     0.5,
@@ -486,6 +559,8 @@ impl App {
             }
             Event::BarrierBroken { pos, .. } => {
                 let p = px(pos);
+                self.fx
+                    .burst(PKind::Debris, p, 16, 200.0, rgb(130, 100, 64));
                 self.fx.shake = self.fx.shake.max(0.2);
                 self.fx.add(p, 0.6, Kind::Puff);
                 self.fx.add(
@@ -943,8 +1018,7 @@ impl App {
 
     fn hud(&mut self, ui: &mut Ui) {
         let g = &self.game;
-        draw_rectangle(0.0, 0.0, W, HUD_H, rgb(16, 18, 22));
-        draw_line(0.0, HUD_H, W, HUD_H, 2.0, rgb(70, 64, 50));
+        bar_background(Rect::new(0.0, 0.0, W, HUD_H), HUD_H);
         text(
             &format!("WAVE {}/{}", g.wave(), MAX_WAVES),
             14.0,
@@ -1032,8 +1106,7 @@ impl App {
 
     fn panel(&mut self, ui: &mut Ui) {
         let y = PANEL_Y;
-        draw_rectangle(0.0, y, W, PANEL_H, rgb(20, 22, 26));
-        draw_line(0.0, y, W, y, 2.0, rgb(70, 64, 50));
+        bar_background(Rect::new(0.0, y, W, PANEL_H), y);
 
         if let Some(t) = self.selected.and_then(|id| self.game.tower(id)).cloned() {
             let s = t.stats();

@@ -87,9 +87,53 @@ pub fn wrap(s: &str, size: f32, max_w: f32) -> Vec<String> {
     lines
 }
 
+/// A bevelled plate: drop shadow, vertical gradient, top highlight, border.
 pub fn panel(r: Rect, fill: Color, border: Color) {
-    draw_rectangle(r.x, r.y, r.w, r.h, fill);
+    draw_rectangle(r.x + 3.0, r.y + 4.0, r.w, r.h, rgba(0, 0, 0, 110));
+    let steps = 6;
+    for i in 0..steps {
+        let t = i as f32 / steps as f32;
+        let k = 1.18 - 0.36 * t;
+        draw_rectangle(
+            r.x,
+            r.y + t * r.h,
+            r.w,
+            r.h / steps as f32 + 0.5,
+            shade(fill, k),
+        );
+    }
+    draw_line(
+        r.x + 2.0,
+        r.y + 2.0,
+        r.x + r.w - 2.0,
+        r.y + 2.0,
+        1.0,
+        rgba(255, 255, 255, 30),
+    );
     draw_rectangle_lines(r.x, r.y, r.w, r.h, 2.0, border);
+}
+
+/// A bar background: metal plate with a gradient and a lit edge on `edge_y`.
+pub fn bar_background(r: Rect, edge_y: f32) {
+    let steps = 8;
+    for i in 0..steps {
+        let t = i as f32 / steps as f32;
+        let c = Color::new(0.07 + 0.03 * t, 0.075 + 0.03 * t, 0.09 + 0.03 * t, 1.0);
+        draw_rectangle(r.x, r.y + t * r.h, r.w, r.h / steps as f32 + 0.5, c);
+    }
+    // Rivets along the edge.
+    let mut x = 10.0;
+    while x < r.w {
+        let y = if edge_y > r.y + r.h / 2.0 {
+            edge_y - 6.0
+        } else {
+            edge_y + 6.0
+        };
+        draw_circle(r.x + x, y, 1.6, rgb(70, 66, 58));
+        x += 48.0;
+    }
+    draw_line(r.x, edge_y, r.x + r.w, edge_y, 3.0, rgb(52, 46, 34));
+    draw_line(r.x, edge_y, r.x + r.w, edge_y, 1.0, rgb(160, 130, 70));
 }
 
 /// Per-frame pointer state. UI widgets consume taps so they don't fall through to the field.

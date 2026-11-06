@@ -1,5 +1,6 @@
 //! Short-lived visual effects driven by engine events.
 
+use crate::light::Lighting;
 use crate::ui::*;
 use macroquad::prelude::*;
 
@@ -18,9 +19,29 @@ pub struct Effect {
     kind: Kind,
 }
 
+/// Small physics particles: brass casings, sparks, embers, debris.
+#[derive(Clone, Copy, PartialEq)]
+pub enum PKind {
+    Casing,
+    Spark,
+    Ember,
+    Debris,
+}
+
+pub struct Particle {
+    pos: Vec2,
+    vel: Vec2,
+    t: f32,
+    life: f32,
+    kind: PKind,
+    color: Color,
+    spin: f32,
+}
+
 #[derive(Default)]
 pub struct Fx {
     list: Vec<Effect>,
+    parts: Vec<Particle>,
     pub shake: f32,
     pub red_flash: f32,
     toast: Option<(String, f32)>,
@@ -36,6 +57,32 @@ impl Fx {
         });
     }
 
+    pub fn particle(&mut self, kind: PKind, pos: Vec2, vel: Vec2, life: f32, color: Color) {
+        if self.parts.len() > 1500 {
+            return;
+        }
+        self.parts.push(Particle {
+            pos,
+            vel,
+            t: 0.0,
+            life,
+            kind,
+            color,
+            spin: macroquad::rand::gen_range(-12.0, 12.0),
+        });
+    }
+
+    /// A burst of `n` particles flying out of `pos`.
+    pub fn burst(&mut self, kind: PKind, pos: Vec2, n: usize, speed: f32, color: Color) {
+        use macroquad::rand::gen_range;
+        for _ in 0..n {
+            let a = gen_range(0.0, std::f32::consts::TAU);
+            let v = vec2(a.cos(), a.sin()) * gen_range(0.3, 1.0) * speed;
+            let life = gen_range(0.25, 0.7);
+            self.particle(kind, pos, v, life, color);
+        }
+    }
+
     pub fn toast(&mut self, s: impl Into<String>) {
         self.toast = Some((s.into(), 1.8));
     }
@@ -49,6 +96,18 @@ impl Fx {
             e.t += dt;
         }
         self.list.retain(|e| e.t < e.life);
+        for p in &mut self.parts {
+            p.t += dt;
+            let gravity = match p.kind {
+                PKind::Casing | PKind::Debris => 600.0,
+                PKind::Spark => 350.0,
+                PKind::Ember => -40.0,
+            };
+            p.vel.y += gravity * dt;
+            p.vel *= 1.0 - (if p.kind == PKind::Ember { 1.5 } else { 0.6 }) * dt;
+            p.pos += p.vel * dt;
+        }
+        self.parts.retain(|p| p.t < p.life);
         self.shake = (self.shake - dt).max(0.0);
         self.red_flash = (self.red_flash - dt).max(0.0);
         if let Some((_, t)) = &mut self.toast {
@@ -60,6 +119,42 @@ impl Fx {
     }
 
     pub fn draw(&self) {
+        for p in &self.parts {
+            let fade = 1.0 - p.t / p.life;
+            match p.kind {
+                PKind::Casing => {
+                    let a = p.spin * p.t;
+                    let d = vec2(a.cos(), a.sin()) * 2.5;
+                    draw_line(
+                        p.pos.x - d.x,
+                        p.pos.y - d.y,
+                        p.pos.x + d.x,
+                        p.pos.y + d.y,
+                        2.0,
+                        with_alpha(rgb(220, 180, 80), fade.min(1.0) * 0.9 + 0.1),
+                    );
+                }
+                PKind::Spark => {
+                    let tail = p.pos - p.vel * 0.02;
+                    draw_line(
+                        tail.x,
+                        tail.y,
+                        p.pos.x,
+                        p.pos.y,
+                        1.5,
+                        with_alpha(p.color, fade),
+                    );
+                }
+                PKind::Ember => draw_circle(p.pos.x, p.pos.y, 1.6, with_alpha(p.color, fade)),
+                PKind::Debris => draw_rectangle(
+                    p.pos.x - 1.5,
+                    p.pos.y - 1.5,
+                    3.0,
+                    3.0,
+                    with_alpha(p.color, fade),
+                ),
+            }
+        }
         for e in &self.list {
             let k = e.t / e.life; // 0..1
             let fade = 1.0 - k;
@@ -126,6 +221,34 @@ impl Fx {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    /// Light emitted by effects (gas clouds, jammer pulses, tracers, flashes).
+    pub fn lights(&self, light: &mut Lighting) {
+        for p in &self.parts {
+            if matches!(p.kind, PKind::Spark | PKind::Ember) {
+                let fade = 1.0 - p.t / p.life;
+                light.add(p.pos, 8.0, with_alpha(p.color, fade));
+            }
+        }
+        for e in &self.list {
+            let fade = 1.0 - e.t / e.life;
+            match &e.kind {
+                Kind::Ring { max_r, color } => light.add(
+                    e.pos,
+                    *max_r * 1.2,
+                    Color::new(color.r, color.g, color.b, 0.7 * fade),
+                ),
+                Kind::Cloud { r } => {
+                    light.add(e.pos, r * 2.2, Color::new(0.5, 1.0, 0.4, 0.8 * fade));
+                }
+                Kind::Tracer { to } => {
+                    light.add_bloom(*to, 22.0, Color::new(1.0, 0.6, 0.4, fade));
+                    light.add_bloom(e.pos, 30.0, Color::new(1.0, 0.8, 0.5, fade));
+                }
+                _ => {}
             }
         }
     }

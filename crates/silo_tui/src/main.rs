@@ -12,7 +12,7 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Widget, Wrap};
 use silo_core::bot::Bot;
-use silo_core::map::{COLS, PLAQUES, ROWS, SECTIONS, VIEW_ROWS, level_of_row, section_of_row, section_view_top};
+use silo_core::map::{COLS, FACILITIES, ROWS, SECTIONS, VIEW_ROWS, level_of_row, section_of_row, section_view_top};
 use silo_core::stats::{MAX_TOWER_LEVEL, MAX_WAVES, START_SEALS};
 use silo_core::*;
 use std::collections::VecDeque;
@@ -601,7 +601,8 @@ impl App {
             });
             lines.push(Line::from(vec!["[x] sell for ".into(), format!("{}", t.sell_value()).yellow()]));
         } else {
-            let where_ = format!(" (level ~{}, {})", level_of_row(r), SECTIONS[section_of_row(r)].0);
+            let place = map::facility_at(c, r).map_or(String::new(), |f| format!("{f}, "));
+            let where_ = format!(" ({place}level ~{}, {})", level_of_row(r), SECTIONS[section_of_row(r)].0);
             let desc = match g.map().tile(c, r) {
                 Tile::Floor => format!("Living quarters{where_}. Buildable."),
                 Tile::ItRoom => "IT's server room. If it falls, the cameras below Up Top go dark.".into(),
@@ -764,8 +765,9 @@ fn dim(c: Color) -> Color {
     }
 }
 
+/// Fits a facility name into a two-tile room.
 fn section_short(name: &str) -> String {
-    name.chars().take(4).collect()
+    name.chars().take((2 * CW) as usize).collect()
 }
 
 impl Widget for FieldView<'_> {
@@ -843,9 +845,16 @@ impl Widget for FieldView<'_> {
                 put(buf, dx as i32, row * CH, ch, label);
             }
         }
-        for &(row, name) in PLAQUES {
-            for (dx, ch) in format!("{:>4}", section_short(name)).chars().enumerate() {
-                put(buf, (COLS - 1) * CW + dx as i32, row * CH, ch, label);
+        // Facility names painted on the first floor of each block, both sides of the shaft.
+        let sign = Style::new().fg(Color::Rgb(150, 130, 90)).italic();
+        for &(row, _, left, right) in FACILITIES {
+            for (x0, name) in [(CW, left), (9 * CW, right)] {
+                if row == map::IT_ROOM[0].1 && x0 == CW || row == map::SUPPLY_ROOM[0].1 && x0 != CW {
+                    continue; // these rooms draw their own signs
+                }
+                for (dx, ch) in section_short(name).chars().enumerate() {
+                    put(buf, x0 + dx as i32, row * CH, ch, sign.bg(FLOOR_BG));
+                }
             }
         }
 
@@ -932,8 +941,11 @@ impl Widget for FieldView<'_> {
             for (dx, ch) in (if joined { "SUPPLY ⚑" } else { "SUPPLY  " }).chars().enumerate() {
                 put(buf, x0 + dx as i32, y0, ch, room.fg(fg).bold());
             }
-            for (dx, ch) in "▤▤ ▤▤▤ ▤".chars().enumerate() {
-                put(buf, x0 + dx as i32, y0 + 1, ch, room.fg(Color::Rgb(150, 115, 70)));
+            let shelves = ["╔══╗╔══╗", "▤▤ ▤▤▤ ▤", if joined { "▤ ¬ ▤▤ ¬" } else { "▤▤▤▤▤▤▤▤" }];
+            for (dy, row) in shelves.iter().enumerate() {
+                for (dx, ch) in row.chars().enumerate() {
+                    put(buf, x0 + dx as i32, y0 + 1 + dy as i32, ch, room.fg(Color::Rgb(150, 115, 70)));
+                }
             }
         }
 
@@ -951,7 +963,7 @@ impl Widget for FieldView<'_> {
         {
             let (c0, r) = map::IT_ROOM[0];
             let (x0, y0) = (c0 * CW, r * CH);
-            let w = map::IT_ROOM.len() as i32 * CW;
+            let w = 2 * CW;
             let room = Style::new().bg(Color::Rgb(16, 24, 40));
             let (top, top_fg) = if g.cameras_down() {
                 (format!("IT {:>3.0}s", g.it_down().ceil()), Color::Red)
@@ -962,10 +974,12 @@ impl Widget for FieldView<'_> {
             for (dx, ch) in top.chars().take(w as usize).enumerate() {
                 put(buf, x0 + dx as i32, y0, ch, room.fg(top_fg).bold());
             }
-            for dx in 0..w {
-                let lit = !g.cameras_down() && noise(dx, (g.tick() / 8) as i32) < 150;
-                let fg = if lit { Color::Rgb(90, 240, 120) } else { Color::Rgb(50, 54, 62) };
-                put(buf, x0 + dx, y0 + 1, if dx % 2 == 0 { '▥' } else { '▤' }, room.fg(fg));
+            for dy in 1..2 * CH {
+                for dx in 0..w {
+                    let lit = !g.cameras_down() && noise(dx + 31 * dy, (g.tick() / 8) as i32) < 150;
+                    let fg = if lit { Color::Rgb(90, 240, 120) } else { Color::Rgb(50, 54, 62) };
+                    put(buf, x0 + dx, y0 + dy, if dx % 2 == 0 { '▥' } else { '▤' }, room.fg(fg));
+                }
             }
         }
 
