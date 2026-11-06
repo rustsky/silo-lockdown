@@ -52,6 +52,9 @@ rustup target add wasm32-unknown-unknown
 ./scripts/build-web.sh
 python3 -m http.server -d dist/web 8080   # open http://localhost:8080
 ```
+`dist/web` is self-contained (`index.html`, `gl.js`, `silo_gfx.wasm`); `gl.js` is miniquad's
+loader, vendored from the exact miniquad version we build against. Any static host works
+(GitHub Pages, itch.io, ...); it just has to serve `.wasm` as `application/wasm`.
 
 **Android** (via [cargo-quad-apk](https://github.com/not-fl3/cargo-quad-apk), easiest with Docker):
 ```sh

@@ -12,8 +12,9 @@
 </head>
 <body>
   <canvas id="glcanvas" tabindex="1"></canvas>
-  <!-- miniquad/macroquad JS loader, matching macroquad 0.4 -->
-  <script src="https://not-fl3.github.io/miniquad-samples/mq_js_bundle.js"></script>
+  <!-- miniquad's JS loader, vendored from the exact miniquad version we build against
+       (crates/silo_gfx/web/gl.js, from miniquad 0.4.11) so the page works offline. -->
+  <script src="gl.js"></script>
   <script>load("silo_gfx.wasm");</script>
 </body>
 </html>
