@@ -2,7 +2,9 @@
 
 use crate::fx::{Fx, Kind, PKind};
 use crate::light::Lighting;
+use crate::music::Music;
 use crate::render::{self, *};
+use crate::sfx::{Sfx, SoundBank};
 use crate::ui::*;
 use macroquad::prelude::*;
 use silo_core as sc;
@@ -78,6 +80,10 @@ pub struct App {
     power_announced: u32,
     decor: Decor,
     light: Lighting,
+    music: Option<Music>,
+    sfx: Option<SoundBank>,
+    /// 0 = music and effects, 1 = effects only, 2 = silent.
+    audio_mode: u8,
     /// Screenshot mode (SILO_SHOT=path.png): autoplay and capture after N frames.
     shot: Option<(String, u32)>,
     frame: u32,
@@ -124,6 +130,9 @@ impl App {
             power_announced: 0,
             decor,
             light: Lighting::new(),
+            music: None,
+            sfx: None,
+            audio_mode: 0,
             shot,
             frame: 0,
             quit: false,
@@ -157,6 +166,108 @@ impl App {
             }
         }
         app
+    }
+
+    pub fn set_audio(&mut self, music: Option<Music>, sfx: Option<SoundBank>) {
+        self.music = music;
+        self.sfx = sfx;
+        // Screenshot runs stay silent.
+        if self.shot.is_some() {
+            self.audio_mode = 2;
+        }
+        self.apply_audio_mode();
+    }
+
+    /// Cycle: music + effects -> effects only -> silent.
+    fn toggle_music(&mut self) {
+        self.audio_mode = (self.audio_mode + 1) % 3;
+        self.apply_audio_mode();
+    }
+
+    fn apply_audio_mode(&mut self) {
+        if let Some(m) = &mut self.music {
+            m.muted = self.audio_mode != 0;
+        }
+        if let Some(s) = &mut self.sfx {
+            s.muted = self.audio_mode == 2;
+        }
+    }
+
+    /// Play an effect, quieter when it happens outside the visible part of the silo.
+    fn sound(&mut self, kind: Sfx, at: Option<sc::Vec2>) {
+        let mut vol = if self.screen == Screen::Playing {
+            1.0
+        } else {
+            0.25
+        };
+        if let Some(p) = at {
+            let y = HUD_H + p.y * TILE;
+            if y < self.scroll + HUD_H - TILE || y > self.scroll + PANEL_Y + TILE {
+                vol *= 0.35;
+            }
+        }
+        if let Some(s) = &mut self.sfx {
+            s.play(kind, vol);
+        }
+    }
+
+    fn event_sound(&mut self, ev: &Event) {
+        use sc::map::{it_center, tile_center};
+        let tower_pos = |g: &Game, id: sc::Id| g.tower(id).map(|t| t.pos);
+        match ev {
+            Event::Shot { kind, from, .. } => {
+                let s = match kind {
+                    TowerKind::Deputy => Sfx::Deputy,
+                    TowerKind::Gas => Sfx::Gas,
+                    TowerKind::Marksman => Sfx::Marksman,
+                    TowerKind::Jammer => Sfx::Jammer,
+                };
+                self.sound(s, Some(*from));
+            }
+            Event::Pulse { pos, .. } => self.sound(Sfx::Jammer, Some(*pos)),
+            Event::EnemyShot { from, .. } => self.sound(Sfx::RebelShot, Some(*from)),
+            Event::Explosion { pos, .. } => self.sound(Sfx::Explosion, Some(*pos)),
+            Event::EnemyKilled { pos, .. } => {
+                self.sound(Sfx::Kill, Some(*pos));
+                self.sound(Sfx::Coin, Some(*pos));
+            }
+            Event::Breach { .. } => self.sound(Sfx::Breach, None),
+            Event::TowerPlaced { col, row, .. } | Event::BarrierPlaced { col, row, .. } => {
+                self.sound(Sfx::Place, Some(tile_center(*col, *row)))
+            }
+            Event::TowerUpgraded { id, .. } => {
+                let p = tower_pos(&self.game, *id);
+                self.sound(Sfx::Upgrade, p);
+            }
+            Event::TowerSold { .. } | Event::BarrierRemoved { .. } => self.sound(Sfx::Sell, None),
+            Event::BarrierBroken { pos, .. } => self.sound(Sfx::BarrierBroken, Some(*pos)),
+            Event::TowerDestroyed { pos, .. } => self.sound(Sfx::TowerDestroyed, Some(*pos)),
+            Event::ItCollapsed { .. } => self.sound(Sfx::ItDown, None),
+            Event::ItRestored => self.sound(Sfx::ItUp, Some(it_center())),
+            Event::PowerCut { .. } => self.sound(Sfx::PowerCut, None),
+            Event::WaveStarted { .. } | Event::SupplyJoined => self.sound(Sfx::Horn, None),
+            Event::WaveCleared { .. } | Event::Won => self.sound(Sfx::Cleared, None),
+            Event::Equipped { pos, .. } => self.sound(Sfx::Equip, Some(*pos)),
+            Event::Lost => {
+                self.sound(Sfx::TowerDestroyed, None);
+                self.sound(Sfx::Breach, None);
+            }
+            Event::EnemySpawned { .. } => {}
+        }
+    }
+
+    /// Calm between waves, driving during them, subdued once the airlock is open.
+    fn update_music(&mut self, dt: f32) {
+        let playing = self.screen == Screen::Playing;
+        let (intensity, volume) = match self.game.phase() {
+            Phase::Wave if playing => (1.0, 1.0),
+            Phase::Lost if playing => (0.0, 0.3),
+            _ if playing => (0.0, 1.0),
+            _ => (0.0, 0.7), // title screen
+        };
+        if let Some(m) = &mut self.music {
+            m.update(dt, intensity, volume);
+        }
     }
 
     pub fn should_quit(&self) -> bool {
@@ -227,6 +338,7 @@ impl App {
         self.simulate(dt);
         self.fx.update(dt);
         self.update_scroll(dt);
+        self.update_music(dt);
         // The world camera is the screen camera rolled down by the current scroll.
         let world_cam = Camera2D {
             target: cam.target + vec2(0.0, self.scroll),
@@ -383,12 +495,21 @@ impl App {
             self.selected_barrier = None;
         }
         for ev in self.game.drain_events() {
+            self.event_sound(&ev);
             self.on_event(ev);
         }
         // Sledgehammers on barricades throw sparks.
-        for e in self.game.enemies().iter().filter(|e| e.blocked && e.tools) {
+        let hammering: Vec<sc::Vec2> = self
+            .game
+            .enemies()
+            .iter()
+            .filter(|e| e.blocked && e.tools)
+            .map(|e| e.pos)
+            .collect();
+        for pos in hammering {
             if rand::gen_range(0.0, 1.0) < dt * 4.0 {
-                let p = px(e.pos) + vec2(rand::gen_range(-8.0, 8.0), -22.0);
+                self.sound(Sfx::BarrierHit, Some(pos));
+                let p = px(pos) + vec2(rand::gen_range(-8.0, 8.0), -22.0);
                 self.fx.burst(PKind::Spark, p, 4, 140.0, rgb(255, 210, 140));
             }
         }
@@ -642,6 +763,9 @@ impl App {
         if is_key_pressed(KeyCode::T) {
             self.autopilot = !self.autopilot;
         }
+        if is_key_pressed(KeyCode::M) {
+            self.toggle_music();
+        }
         if is_key_pressed(KeyCode::U) {
             self.upgrade_selected();
         }
@@ -792,6 +916,7 @@ impl App {
     }
 
     fn pick(&mut self, k: Tool) {
+        self.sound(Sfx::Click, None);
         self.selected = None;
         self.selected_barrier = None;
         self.build = if self.build == Some(k) { None } else { Some(k) };
@@ -1085,7 +1210,7 @@ impl App {
         }
 
         // Speed / pause / autopilot.
-        let b = |i: f32| Rect::new(W - 178.0 + i * 58.0, 10.0, 52.0, 52.0);
+        let b = |i: f32| Rect::new(W - 190.0 + i * 47.0, 10.0, 43.0, 52.0);
         let speed = format!("{}x", self.speed);
         if ui.button(b(0.0), &[&speed], true, rgb(120, 160, 220)) {
             self.cycle_speed();
@@ -1101,6 +1226,81 @@ impl App {
         };
         if ui.button(b(2.0), &["AI"], true, ai_col) {
             self.autopilot = !self.autopilot;
+        }
+        // Music on/off: a little speaker icon.
+        let muted = self.audio_mode == 2 || (self.music.is_none() && self.sfx.is_none());
+        let fx_only = self.audio_mode == 1;
+        let r = b(3.0);
+        let mus_col = if muted {
+            rgb(110, 120, 130)
+        } else {
+            rgb(230, 190, 90)
+        };
+        if ui.button(
+            r,
+            &[""],
+            self.music.is_some() || self.sfx.is_some(),
+            mus_col,
+        ) {
+            self.toggle_music();
+        }
+        if fx_only {
+            text_centered(
+                "FX",
+                r.x + r.w / 2.0,
+                r.y + r.h - 4.0,
+                10.0,
+                rgb(230, 190, 90),
+            );
+        }
+        let c = vec2(r.x + r.w / 2.0 - 4.0, r.y + r.h / 2.0);
+        let ic = if muted { rgb(120, 120, 126) } else { WHITE };
+        draw_rectangle(c.x - 6.0, c.y - 4.0, 5.0, 8.0, ic);
+        draw_triangle(
+            vec2(c.x - 2.0, c.y - 4.0),
+            vec2(c.x + 5.0, c.y - 10.0),
+            vec2(c.x + 5.0, c.y + 10.0),
+            ic,
+        );
+        draw_triangle(
+            vec2(c.x - 2.0, c.y - 4.0),
+            vec2(c.x - 2.0, c.y + 4.0),
+            vec2(c.x + 5.0, c.y + 10.0),
+            ic,
+        );
+        if muted {
+            draw_line(
+                c.x + 8.0,
+                c.y - 5.0,
+                c.x + 16.0,
+                c.y + 5.0,
+                2.0,
+                rgb(230, 90, 70),
+            );
+            draw_line(
+                c.x + 8.0,
+                c.y + 5.0,
+                c.x + 16.0,
+                c.y - 5.0,
+                2.0,
+                rgb(230, 90, 70),
+            );
+        } else {
+            for k in 0..2 {
+                let rr = 6.0 + k as f32 * 5.0;
+                for i in 0..5 {
+                    let a0 = -0.7 + i as f32 * 0.28;
+                    let a1 = a0 + 0.28;
+                    draw_line(
+                        c.x + 4.0 + a0.cos() * rr,
+                        c.y + a0.sin() * rr,
+                        c.x + 4.0 + a1.cos() * rr,
+                        c.y + a1.sin() * rr,
+                        1.5,
+                        ic,
+                    );
+                }
+            }
         }
     }
 
@@ -1377,7 +1577,7 @@ impl App {
             self.start();
         }
         text_centered(
-            "1-4 build  5 barrier  N wave  U upgrade  X sell  W/S roll  F speed  T AI",
+            "1-4 build  5 barrier  N wave  U upgrade  X sell  W/S roll  F speed  T AI  M sound",
             W / 2.0,
             H - 40.0,
             15.0,

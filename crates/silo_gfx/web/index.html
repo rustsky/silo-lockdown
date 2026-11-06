@@ -2,19 +2,35 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <title>Silo: Lockdown</title>
+  <!-- Installable web app: Add to Home Screen runs it full-screen and offline. -->
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Silo">
+  <meta name="theme-color" content="#08080a">
   <style>
     html, body, canvas { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden;
-      background: #08080a; touch-action: none; }
+      background: #08080a; touch-action: none; overscroll-behavior: none;
+      -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
     canvas:focus { outline: none; }
   </style>
 </head>
 <body>
   <canvas id="glcanvas" tabindex="1"></canvas>
-  <!-- miniquad's JS loader, vendored from the exact miniquad version we build against
-       (crates/silo_gfx/web/gl.js, from miniquad 0.4.11) so the page works offline. -->
+  <!-- miniquad's and quad-snd's JS loaders, vendored from the exact versions we build
+       against (miniquad 0.4.11, quad-snd 0.2.8), plus our iOS audio unlock. -->
   <script src="gl.js"></script>
-  <script>load("silo_gfx.wasm");</script>
+  <script src="audio.js"></script>
+  <script src="audio-unlock.js"></script>
+  <script>
+    load("silo_gfx.wasm");
+    if ("serviceWorker" in navigator && location.protocol === "https:") {
+      navigator.serviceWorker.register("sw.js").catch(function () {});
+    }
+  </script>
 </body>
 </html>

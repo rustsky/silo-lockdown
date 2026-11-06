@@ -4,9 +4,13 @@
 mod app;
 mod fx;
 mod light;
+mod music;
 mod render;
+mod sfx;
+mod synth;
 mod ui;
 
+use macroquad::experimental::coroutines::start_coroutine;
 use macroquad::prelude::*;
 
 fn window_conf() -> Conf {
@@ -24,7 +28,18 @@ fn window_conf() -> Conf {
 #[macroquad::main(window_conf)]
 async fn main() {
     let mut app = app::App::new();
+    // The soundtrack and effects are synthesised in the background (no audio files); music fades in once
+    // ready; on the web, decoding finishes asynchronously, so never block the game on it.
+    let mut loading = Some(start_coroutine(async {
+        (music::Music::load().await, sfx::SoundBank::load().await)
+    }));
     loop {
+        if let Some(c) = loading.as_ref().filter(|c| c.is_done()) {
+            if let Some((music, effects)) = c.retrieve() {
+                app.set_audio(music, effects);
+            }
+            loading = None;
+        }
         app.frame();
         if app.should_quit() {
             break;

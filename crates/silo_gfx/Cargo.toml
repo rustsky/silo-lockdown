@@ -5,7 +5,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-macroquad = "0.4"
+macroquad = { version = "0.4", features = ["audio"] }
 silo_core = { path = "../silo_core" }
 
 # Android build via cargo-quad-apk (see README).

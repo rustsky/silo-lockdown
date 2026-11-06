@@ -1,0 +1,4 @@
+# quad-snd (the soundtrack) declares its Web Audio imports as plain externs; newer rustc
+# treats unresolved wasm symbols as errors unless told they are JS imports.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=--allow-undefined"]

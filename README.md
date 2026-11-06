@@ -22,7 +22,7 @@ cargo run --release -p silo_tui   # terminal, needs at least 90x29
 ```
 
 Controls (both): `1-4` pick tower, `5` barrier, click/tap to build or select, `U` upgrade, `X` sell,
-`N`/Space send wave, `F` speed, `P` pause, `T` autopilot, `Esc` deselect.
+`N`/Space send wave, `F` speed, `P` pause, `T` autopilot, `M` sound (GUI), `Esc` deselect.
 
 The silo is three sections tall (Up Top, Mids, Down Deep); the field shows one at a time.
 Roll the view with `W`/`S`/arrows/PageUp/PageDown, the mouse wheel, or by dragging the field
@@ -46,15 +46,25 @@ Threats beyond the stair:
 
 **Desktop (macOS / Windows / Linux):** `cargo run --release -p silo_gfx`
 
-**Web (WASM):**
+**Web (WASM), installable on phones:**
 ```sh
 rustup target add wasm32-unknown-unknown
 ./scripts/build-web.sh
 python3 -m http.server -d dist/web 8080   # open http://localhost:8080
 ```
-`dist/web` is self-contained (`index.html`, `gl.js`, `silo_gfx.wasm`); `gl.js` is miniquad's
-loader, vendored from the exact miniquad version we build against. Any static host works
-(GitHub Pages, itch.io, ...); it just has to serve `.wasm` as `application/wasm`.
+`dist/web` is a complete installable web app (PWA): `index.html`, the wasm, miniquad's
+`gl.js` and quad-snd's `audio.js` (vendored from the exact versions we build against),
+`audio-unlock.js` (fixes silent audio on iPhone), a manifest, icons and a service worker.
+Upload the folder to any HTTPS host (GitHub Pages, Netlify, itch.io...). On iPhone: open the
+URL in Safari, Share -> Add to Home Screen. It then launches full-screen from its icon and
+runs offline from the phone (the service worker caches the whole game on the device).
+
+**Share as a single file:**
+```sh
+./scripts/build-single-html.sh   # -> dist/silo-lockdown.html (~1.3 MB)
+```
+One self-contained HTML file (wasm embedded as base64, loaders inlined). Open it by
+double-clicking, send it to someone, or drop it on any web host; no server or install needed.
 
 **Android** (via [cargo-quad-apk](https://github.com/not-fl3/cargo-quad-apk), easiest with Docker):
 ```sh
@@ -70,6 +80,18 @@ cargo build --release -p silo_gfx --target aarch64-apple-ios
 ```
 Then put the binary in a `.app` bundle with an `Info.plist` and sign it
 (see the [macroquad iOS guide](https://macroquad.rs/articles/ios/)).
+
+## Music and sound
+
+All audio is synthesised at startup (no audio files):
+- `music.rs`: a D-minor "shift" loop between waves and an "uprising" loop with bass, drums and
+  arpeggio during waves, crossfaded with the game phase.
+- `sfx.rs`: 22 effects (each tower's shot, rebel gunfire, explosions, kills and bounty, breach
+  klaxon, wave horn, IT power-down, power cuts, barricade hits, build/upgrade/sell...). Frequent
+  ones have variations; playback is rate-limited and quieter for off-screen action.
+
+`M` or the speaker button cycles music + effects, effects only (FX), silent. To listen to the
+raw sounds: `SILO_MUSIC_OUT=/tmp cargo test -p silo_gfx` writes every loop and effect as WAV.
 
 ## Engine tools
 

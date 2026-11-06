@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
-# Build the web version into dist/web. Serve it with any static server, e.g.
-#   python3 -m http.server -d dist/web 8080
+# Build the web version into dist/web: an installable, offline-capable web app (PWA).
+# Serve it from any HTTPS host (GitHub Pages, Netlify, ...), open it on the phone and use
+# "Add to Home Screen". Locally: python3 -m http.server -d dist/web 8080
 set -euo pipefail
 cd "$(dirname "$0")/.."
 cargo build --release -p silo_gfx --target wasm32-unknown-unknown
-mkdir -p dist/web
+rm -rf dist/web && mkdir -p dist/web
 cp target/wasm32-unknown-unknown/release/silo_gfx.wasm dist/web/
-cp crates/silo_gfx/web/index.html crates/silo_gfx/web/gl.js dist/web/
-echo "Built dist/web — run: python3 -m http.server -d dist/web 8080"
+cp crates/silo_gfx/web/{index.html,gl.js,audio.js,audio-unlock.js,manifest.webmanifest,icon-192.png,icon-512.png,apple-touch-icon.png} dist/web/
+# New build -> new service-worker cache, so installed copies pick up the update.
+version=$(cat dist/web/silo_gfx.wasm dist/web/*.js | shasum | cut -c1-12)
+sed "s/CACHE_VERSION/$version/" crates/silo_gfx/web/sw.js > dist/web/sw.js
+echo "Built dist/web (cache $version) — run: python3 -m http.server -d dist/web 8080"
