@@ -1,0 +1,7 @@
+[package]
+name = "silo_core"
+description = "Renderer-agnostic, deterministic tower defense engine for Silo: Lockdown"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

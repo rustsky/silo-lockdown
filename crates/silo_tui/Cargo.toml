@@ -1,0 +1,8 @@
+[package]
+name = "silo_tui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ratatui = "0.29"
+silo_core = { path = "../silo_core" }
