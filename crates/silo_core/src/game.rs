@@ -112,11 +112,24 @@ pub struct Barrier {
     pub dist: f32,
     pub pos: Vec2,
     pub hp: f32,
+    pub max_hp: f32,
+    pub level: u8,
+    /// Chits spent on it (build + upgrades).
+    pub invested: u32,
+    /// Smashed: a wreck that no longer blocks. IT rebuilds it after the wave.
+    pub broken: bool,
 }
 
 impl Barrier {
+    /// Refund for tearing it down: scales with remaining strength (nothing for a wreck).
     pub fn refund(&self) -> u32 {
-        (BARRIER_COST as f32 * SELL_REFUND * self.hp / BARRIER_HP).floor() as u32
+        if self.broken {
+            return 0;
+        }
+        (self.invested as f32 * SELL_REFUND * self.hp / self.max_hp).floor() as u32
+    }
+    pub fn upgrade_cost(&self) -> Option<u32> {
+        barrier_upgrade_cost(self.level)
     }
 }
 
@@ -149,6 +162,9 @@ pub enum Command {
     Sell { tower: Id },
     PlaceBarrier { col: i32, row: i32 },
     RemoveBarrier { barrier: Id },
+    UpgradeBarrier { barrier: Id },
+    /// Pay Judicial to arrest a rebel on the stair.
+    Arrest { enemy: Id },
     SendWave,
 }
 
@@ -165,6 +181,11 @@ pub enum CommandError {
     /// Barriers only go on the stair above the Supply depot.
     BarrierNotAllowed,
     NoSuchBarrier,
+    /// The barrier is a wreck until the wave ends.
+    BarrierBroken,
+    NoSuchEnemy,
+    /// Judicial can't arrest someone the cameras can't see.
+    NotVisible,
 }
 
 impl std::fmt::Display for CommandError {
@@ -180,6 +201,9 @@ impl std::fmt::Display for CommandError {
             Self::WaveInProgress => write!(f, "wave already in progress"),
             Self::BarrierNotAllowed => write!(f, "barriers go on the stair above Supply"),
             Self::NoSuchBarrier => write!(f, "no barrier there"),
+            Self::BarrierBroken => write!(f, "that barrier is wrecked; IT rebuilds it after the wave"),
+            Self::NoSuchEnemy => write!(f, "no rebel there"),
+            Self::NotVisible => write!(f, "the cameras can't see them"),
         }
     }
 }
@@ -211,6 +235,11 @@ pub enum Event {
     BarrierPlaced { id: Id, col: i32, row: i32 },
     BarrierBroken { id: Id, pos: Vec2 },
     BarrierRemoved { id: Id, refund: u32 },
+    BarrierUpgraded { id: Id, level: u8 },
+    /// End of wave: IT rebuilt `rebuilt` wrecked barriers and patched the damaged ones.
+    BarriersRepaired { rebuilt: u32 },
+    /// Judicial arrested a rebel. A leader is sent to cleaning.
+    Arrested { id: Id, kind: EnemyKind, pos: Vec2, dist: f32, cost: u32 },
     /// IT's server room fell: cameras below Up Top are dark for `seconds`.
     ItCollapsed { seconds: f32 },
     ItRestored,
@@ -235,6 +264,8 @@ pub struct Totals {
     pub breaches: u32,
     pub towers_lost: u32,
     pub barriers_broken: u32,
+    /// Rebels arrested by Judicial.
+    pub arrests: u32,
     /// Rebels Supply handed guns / tools to.
     pub armed: u32,
     pub tooled: u32,
@@ -425,6 +456,8 @@ impl Game {
             Command::Sell { tower } => self.sell(tower).map(|_| ()),
             Command::PlaceBarrier { col, row } => self.place_barrier(col, row).map(|_| ()),
             Command::RemoveBarrier { barrier } => self.remove_barrier(barrier).map(|_| ()),
+            Command::UpgradeBarrier { barrier } => self.upgrade_barrier(barrier).map(|_| ()),
+            Command::Arrest { enemy } => self.arrest(enemy).map(|_| ()),
             Command::SendWave => self.send_wave().map(|_| ()),
         }
     }
@@ -486,7 +519,18 @@ impl Game {
         let dist = self.map.barrier_dist(col, row).ok_or(CommandError::BarrierNotAllowed)?;
         self.spend(BARRIER_COST);
         let id = self.alloc_id();
-        self.barriers.push(Barrier { id, col, row, dist, pos: self.map.pos_at(dist), hp: BARRIER_HP });
+        self.barriers.push(Barrier {
+            id,
+            col,
+            row,
+            dist,
+            pos: self.map.pos_at(dist),
+            hp: barrier_hp(1),
+            max_hp: barrier_hp(1),
+            level: 1,
+            invested: BARRIER_COST,
+            broken: false,
+        });
         self.emit(Event::BarrierPlaced { id, col, row });
         Ok(id)
     }
@@ -500,6 +544,53 @@ impl Game {
         self.totals.chits_refunded += refund;
         self.emit(Event::BarrierRemoved { id, refund });
         Ok(refund)
+    }
+
+    /// Reinforce a barrier. Returns the new level.
+    pub fn upgrade_barrier(&mut self, id: Id) -> Result<u8, CommandError> {
+        self.check_live()?;
+        let b = self.barrier(id).ok_or(CommandError::NoSuchBarrier)?;
+        if b.broken {
+            return Err(CommandError::BarrierBroken);
+        }
+        let cost = b.upgrade_cost().ok_or(CommandError::MaxLevel)?;
+        self.afford(cost)?;
+        self.spend(cost);
+        let b = self.barriers.iter_mut().find(|b| b.id == id).unwrap();
+        b.level += 1;
+        b.invested += cost;
+        let new_max = barrier_hp(b.level);
+        b.hp += new_max - b.max_hp;
+        b.max_hp = new_max;
+        let level = b.level;
+        self.emit(Event::BarrierUpgraded { id, level });
+        Ok(level)
+    }
+
+    /// What Judicial charges to arrest this rebel right now.
+    pub fn arrest_cost(&self, enemy: &Enemy) -> u32 {
+        arrest_cost(enemy.kind, self.wave)
+    }
+
+    /// Pay Judicial to arrest a rebel on the stair. No bounty is paid for arrests.
+    /// Returns the cost.
+    pub fn arrest(&mut self, id: Id) -> Result<u32, CommandError> {
+        self.check_live()?;
+        let idx = self
+            .enemies
+            .iter()
+            .position(|e| e.id == id && e.hp > 0.0)
+            .ok_or(CommandError::NoSuchEnemy)?;
+        if !self.is_visible(self.enemies[idx].pos) {
+            return Err(CommandError::NotVisible);
+        }
+        let cost = self.arrest_cost(&self.enemies[idx]);
+        self.afford(cost)?;
+        self.spend(cost);
+        let e = self.enemies.remove(idx);
+        self.totals.arrests += 1;
+        self.emit(Event::Arrested { id: e.id, kind: e.kind, pos: e.pos, dist: e.dist, cost });
+        Ok(cost)
     }
 
     /// Start the next wave. Returns its number.
@@ -604,7 +695,11 @@ impl Game {
             let mut next = (e.dist + e.effective_speed() * TICK).min(len);
             // The first intact barrier ahead stops the climb.
             e.blocked = false;
-            if let Some(b) = self.barriers.iter().filter(|b| b.dist > e.dist).min_by(|a, b| a.dist.total_cmp(&b.dist))
+            if let Some(b) = self
+                .barriers
+                .iter()
+                .filter(|b| !b.broken && b.dist > e.dist)
+                .min_by(|a, b| a.dist.total_cmp(&b.dist))
                 && next >= b.dist - BARRIER_STOP
             {
                 next = e.dist.max(b.dist - BARRIER_STOP);
@@ -758,7 +853,7 @@ impl Game {
                 if let Some(b) = self
                     .barriers
                     .iter_mut()
-                    .filter(|b| b.dist > edist)
+                    .filter(|b| !b.broken && b.dist > edist)
                     .min_by(|a, b| a.dist.total_cmp(&b.dist))
                 {
                     b.hp -= dmg;
@@ -793,14 +888,14 @@ impl Game {
                 self.emit(Event::TowerDestroyed { id: t.id, kind: t.kind, pos: t.pos });
             }
         }
-        let mut i = 0;
-        while i < self.barriers.len() {
-            if self.barriers[i].hp <= 0.0 {
-                let b = self.barriers.remove(i);
+        for i in 0..self.barriers.len() {
+            let b = &mut self.barriers[i];
+            if !b.broken && b.hp <= 0.0 {
+                b.hp = 0.0;
+                b.broken = true;
+                let (id, pos) = (b.id, b.pos);
                 self.totals.barriers_broken += 1;
-                self.emit(Event::BarrierBroken { id: b.id, pos: b.pos });
-            } else {
-                i += 1;
+                self.emit(Event::BarrierBroken { id, pos });
             }
         }
         if self.it_down > 0.0 {
@@ -912,6 +1007,17 @@ impl Game {
         for t in &mut self.towers {
             t.hp = t.max_hp;
         }
+        let mut rebuilt = 0;
+        let mut patched = false;
+        for b in &mut self.barriers {
+            rebuilt += b.broken as u32;
+            patched |= b.hp < b.max_hp;
+            b.broken = false;
+            b.hp = b.max_hp;
+        }
+        if patched {
+            self.emit(Event::BarriersRepaired { rebuilt });
+        }
         if self.it_down > 0.0 || self.it_hp < IT_HP {
             let was_down = self.it_down > 0.0;
             self.it_down = 0.0;
@@ -1005,6 +1111,7 @@ impl Game {
         for b in &self.barriers {
             mix(b.id as u64);
             mix(b.hp.to_bits() as u64);
+            mix(b.level as u64 | (b.broken as u64) << 8);
         }
         mix(self.it_hp.to_bits() as u64);
         mix(self.it_down.to_bits() as u64);
@@ -1071,8 +1178,16 @@ impl Game {
             }
         }
         for (i, b) in self.barriers.iter().enumerate() {
-            if !self.map.barrier_allowed(b.col, b.row) || !(b.hp > 0.0 && b.hp <= BARRIER_HP) {
+            let hp_ok = if b.broken { b.hp == 0.0 } else { b.hp > 0.0 && b.hp <= b.max_hp + 1e-3 };
+            if !self.map.barrier_allowed(b.col, b.row)
+                || !hp_ok
+                || !(1..=BARRIER_MAX_LEVEL).contains(&b.level)
+                || b.max_hp != barrier_hp(b.level)
+            {
                 return Err(format!("bad barrier {b:?}"));
+            }
+            if b.broken && matches!(self.phase, Phase::Building | Phase::Won) {
+                return Err(format!("barrier {} still wrecked between waves", b.id));
             }
             if self.barriers[i + 1..].iter().any(|o| (o.col, o.row) == (b.col, b.row)) {
                 return Err(format!("two barriers at ({},{})", b.col, b.row));

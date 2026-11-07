@@ -4,6 +4,7 @@
 mod app;
 mod cleaning;
 mod fx;
+mod judicial;
 mod light;
 mod music;
 mod render;

@@ -2889,61 +2889,152 @@ fn supply_room(game: &Game, time: f32) {
     );
 }
 
-/// A barricade of crates and sandbags across the stair; cracks as it weakens.
-pub fn barrier_icon(c: Vec2, s: f32, hp: f32, alpha: f32) {
+/// A barricade across the stair. Level 1: crates and planks nailed together. Level 2: a
+/// sandbag wall backed by corrugated steel. Level 3: a welded riot gate with spikes and hazard
+/// stripes. Cracks and dents show as it weakens (`hp` 0..1); a wreck is a heap of debris.
+pub fn barrier_icon(c: Vec2, s: f32, level: u8, hp: f32, broken: bool, alpha: f32) {
     let a = |col: Color| with_alpha(col, alpha);
-    let (w, h) = (40.0 * s, 30.0 * s);
+    let line = |p: Vec2, q: Vec2, w: f32, col: Color| draw_line(p.x, p.y, q.x, q.y, w * s, a(col));
     let base = c + vec2(0.0, 6.0 * s);
-    draw_rectangle(base.x - w / 2.0, base.y - h, w, h, a(rgb(110, 84, 52)));
-    for i in 0..3 {
-        let yy = base.y - h + (i as f32 + 0.5) * h / 3.0;
-        draw_line(
-            base.x - w / 2.0,
-            yy,
-            base.x + w / 2.0,
-            yy,
-            1.5 * s,
-            a(rgb(70, 52, 30)),
-        );
+    let (w, h) = (42.0 * s, 30.0 * s);
+    let (l, r, top) = (base.x - w / 2.0, base.x + w / 2.0, base.y - h);
+    let v = |x: f32, y: f32| vec2(base.x + x * s, base.y + y * s);
+
+    if broken {
+        // The wreck: splintered planks / torn bags / bent bars in a low heap.
+        draw_ellipse(base.x, base.y, w * 0.55, 3.5 * s, 0.0, a(rgba(0, 0, 0, 110)));
+        match level {
+            1 => {
+                for (x0, y0, x1, y1) in [(-18.0, -2.0, 2.0, -7.0), (-6.0, -1.0, 16.0, -4.0), (4.0, -8.0, 19.0, -1.0)] {
+                    line(v(x0, y0), v(x1, y1), 3.0, rgb(112, 84, 50));
+                    line(v(x0, y0 - 1.0), v(x1, y1 - 1.0), 0.8, rgb(150, 118, 76));
+                }
+                quad(v(-12.0, 0.0), v(-2.0, 0.0), v(-4.0, -6.0), v(-13.0, -5.0), a(rgb(96, 72, 44)));
+            }
+            2 => {
+                for (x, y) in [(-13.0, -2.5), (-2.0, -2.0), (10.0, -3.0), (-7.0, -7.0), (5.0, -7.5)] {
+                    sandbag(v(x, y), 11.0 * s, 6.0 * s, alpha);
+                }
+                quad(v(8.0, -1.0), v(19.0, -3.0), v(17.0, -12.0), v(9.0, -9.0), a(rgb(110, 116, 120)));
+            }
+            _ => {
+                quad(v(-19.0, 0.0), v(19.0, 0.0), v(15.0, -6.0), v(-16.0, -4.0), a(rgb(74, 78, 84)));
+                for x in [-12.0, -4.0, 6.0, 13.0] {
+                    line(v(x, -3.0), v(x + 5.0, -13.0 + (x * 0.7).sin() * 3.0), 2.2, rgb(120, 124, 130));
+                }
+                for i in 0..4 {
+                    let x = -16.0 + i as f32 * 8.0;
+                    quad(v(x, 0.0), v(x + 4.0, 0.0), v(x + 5.0, -3.0), v(x + 1.0, -3.0), a(rgb(230, 190, 40)));
+                }
+            }
+        }
+        // Grey dust over it.
+        for i in 0..5 {
+            let x = -16.0 + i as f32 * 8.0;
+            draw_circle(base.x + x * s, base.y - 1.0 * s, 1.2 * s, a(rgb(120, 116, 108)));
+        }
+        return;
     }
-    for dx in [-w / 2.0 + 3.0 * s, w / 2.0 - 3.0 * s] {
-        draw_line(
-            base.x + dx,
-            base.y - h,
-            base.x + dx,
-            base.y,
-            3.0 * s,
-            a(rgb(60, 62, 66)),
-        );
-    }
-    // Sandbags on top.
-    for i in 0..4 {
-        let x = base.x - w / 2.0 + 5.0 * s + i as f32 * 10.0 * s;
-        draw_circle(x, base.y - h, 5.0 * s, a(rgb(170, 150, 110)));
-    }
+
+    draw_ellipse(base.x, base.y + 1.0, w * 0.55, 3.5 * s, 0.0, a(rgba(0, 0, 0, 110)));
     let hp = hp.clamp(0.0, 1.0);
-    if hp < 0.66 {
-        draw_line(
-            base.x - 8.0 * s,
-            base.y - h + 4.0,
-            base.x + 2.0 * s,
-            base.y - 8.0 * s,
-            1.5,
-            a(rgb(30, 22, 14)),
-        );
+    match level {
+        1 => {
+            // Two crates side by side.
+            for (x0, x1, k) in [(l, base.x - 1.0 * s, 0.85), (base.x + 1.0 * s, r, 1.0)] {
+                let rc = Rect::new(x0, top + 6.0 * s, x1 - x0, h - 6.0 * s);
+                draw_rectangle(rc.x, rc.y, rc.w, rc.h, a(shade(rgb(132, 98, 58), k)));
+                draw_rectangle_lines(rc.x, rc.y, rc.w, rc.h, 1.5 * s, a(rgb(70, 50, 28)));
+                line(vec2(rc.x, rc.y), vec2(rc.x + rc.w, rc.y + rc.h), 1.5, rgb(84, 62, 36));
+                line(vec2(rc.x, rc.y + rc.h), vec2(rc.x + rc.w, rc.y), 1.5, rgb(84, 62, 36));
+                draw_rectangle(rc.x, rc.y, rc.w, 1.5 * s, a(rgb(170, 132, 86)));
+            }
+            // Planks nailed across.
+            for (y0, y1, k) in [(-20.0, -10.0, 1.0), (-8.0, -16.0, 0.9)] {
+                line(v(-23.0, y0), v(23.0, y1), 4.0, shade(rgb(150, 112, 66), k));
+                line(v(-23.0, y0 - 1.5), v(23.0, y1 - 1.5), 0.8, rgb(184, 148, 98));
+                for x in [-18.0, 18.0] {
+                    let t = (x + 23.0) / 46.0;
+                    draw_circle(base.x + x * s, base.y + (y0 + (y1 - y0) * t) * s, 0.9 * s, a(rgb(60, 60, 64)));
+                }
+            }
+            // A chair jammed on top.
+            line(v(-10.0, -24.0), v(-10.0, -32.0), 1.6, rgb(90, 66, 40));
+            line(v(-10.0, -28.0), v(-3.0, -28.0), 1.8, rgb(110, 82, 50));
+            line(v(-3.0, -28.0), v(-2.0, -24.0), 1.6, rgb(90, 66, 40));
+        }
+        2 => {
+            // Corrugated steel sheet behind.
+            let sheet = Rect::new(l + 3.0 * s, top - 6.0 * s, w - 6.0 * s, h);
+            draw_rectangle(sheet.x, sheet.y, sheet.w, sheet.h, a(rgb(104, 110, 116)));
+            let mut x = sheet.x + 2.0 * s;
+            while x < sheet.x + sheet.w {
+                draw_line(x, sheet.y, x, sheet.y + sheet.h, 1.2 * s, a(rgb(140, 146, 152)));
+                x += 4.0 * s;
+            }
+            for (rx, ry) in [(0.12, 0.15), (0.88, 0.15)] {
+                draw_circle(sheet.x + sheet.w * rx, sheet.y + sheet.h * ry, 1.0 * s, a(rgb(60, 62, 66)));
+            }
+            // Three staggered rows of sandbags.
+            for (row, n) in [(0, 4), (1, 4), (2, 3)] {
+                let y = base.y - 4.0 * s - row as f32 * 6.5 * s;
+                let off = if row % 2 == 1 { 5.0 } else { 0.0 };
+                for i in 0..n {
+                    let x = l + (6.0 + off + i as f32 * 10.0) * s;
+                    sandbag(vec2(x, y), 11.0 * s, 7.0 * s, alpha);
+                }
+            }
+        }
+        _ => {
+            // Welded riot gate: frame, bars, a steel plate, hazard stripes and spikes.
+            let steel = rgb(84, 90, 98);
+            draw_rectangle(l, top - 2.0 * s, w, h + 2.0 * s, a(rgb(40, 42, 46)));
+            for x in [-17.0, -8.5, 0.0, 8.5, 17.0] {
+                line(v(x, 0.0), v(x, -32.0), 2.6, steel);
+                line(v(x - 0.8, 0.0), v(x - 0.8, -32.0), 0.7, rgb(150, 156, 164));
+                draw_triangle(v(x - 2.0, -32.0), v(x + 2.0, -32.0), v(x, -37.0), a(rgb(170, 176, 184)));
+            }
+            line(v(-21.0, -31.0), v(21.0, -31.0), 3.0, steel);
+            let plate = Rect::new(l + 4.0 * s, top + 6.0 * s, w - 8.0 * s, 13.0 * s);
+            draw_rectangle(plate.x, plate.y, plate.w, plate.h, a(rgb(118, 124, 132)));
+            draw_rectangle(plate.x, plate.y, plate.w, 1.2 * s, a(rgb(170, 176, 184)));
+            text_centered("IT", base.x, plate.y + plate.h * 0.78, 10.0 * s, a(rgb(40, 44, 50)));
+            for (rx, ry) in [(0.06, 0.2), (0.94, 0.2), (0.06, 0.8), (0.94, 0.8)] {
+                draw_circle(plate.x + plate.w * rx, plate.y + plate.h * ry, 0.9 * s, a(rgb(60, 62, 66)));
+            }
+            // Hazard stripes along the foot.
+            draw_rectangle(l, base.y - 5.0 * s, w, 5.0 * s, a(rgb(30, 30, 30)));
+            let mut x = 0.0;
+            while x < 42.0 {
+                quad(v(-21.0 + x, 0.0), v(-18.0 + x, 0.0), v(-15.0 + x, -5.0), v(-18.0 + x, -5.0), a(rgb(230, 190, 40)));
+                x += 6.0;
+            }
+            line(v(-21.0, 0.0), v(-21.0, -32.0), 3.4, rgb(60, 64, 70));
+            line(v(21.0, 0.0), v(21.0, -32.0), 3.4, rgb(60, 64, 70));
+        }
     }
-    if hp < 0.33 {
-        draw_line(
-            base.x + 10.0 * s,
-            base.y - h + 6.0,
-            base.x - 2.0 * s,
-            base.y - 4.0,
-            1.5,
-            a(rgb(30, 22, 14)),
-        );
+    // Damage: cracks, then holes.
+    let crack = rgb(28, 22, 16);
+    if hp < 0.7 {
+        line(v(-9.0, -24.0), v(-4.0, -16.0), 1.4, crack);
+        line(v(-4.0, -16.0), v(1.0, -12.0), 1.2, crack);
+    }
+    if hp < 0.45 {
+        line(v(12.0, -22.0), v(7.0, -13.0), 1.4, crack);
+        line(v(7.0, -13.0), v(11.0, -7.0), 1.2, crack);
+        draw_circle(base.x + 4.0 * s, base.y - 19.0 * s, 2.0 * s, a(rgba(10, 10, 12, 200)));
+    }
+    if hp < 0.2 {
+        line(v(-15.0, -10.0), v(-6.0, -4.0), 1.6, crack);
+        draw_circle(base.x - 11.0 * s, base.y - 14.0 * s, 2.6 * s, a(rgba(10, 10, 12, 220)));
+    }
+    // Level pips.
+    for i in 0..level {
+        let x = base.x + (i as f32 - (level as f32 - 1.0) / 2.0) * 5.0 * s;
+        draw_circle(x, base.y + 4.0 * s, 1.4 * s, a(rgb(250, 210, 80)));
     }
     if hp < 1.0 {
-        hp_bar(vec2(base.x, base.y - h - 12.0 * s), w, hp);
+        hp_bar(vec2(base.x, top - 14.0 * s), w, hp);
     }
 }
 
@@ -3013,7 +3104,7 @@ pub fn darkness(game: &Game, time: f32) {
 
 /// A rebel, side-on, walking the way the stair goes (right on the front passes, left on the
 /// back ones). Proportions: boots, two legs, torso, swinging arms, head, per-kind kit.
-fn rebel(e: &sc::Enemy, front: bool, time: f32) {
+pub fn rebel(e: &sc::Enemy, front: bool, time: f32) {
     let leader = e.kind == EnemyKind::Leader;
     let s = 1.5 * if leader { 1.25 } else { 1.0 } * if front { 1.0 } else { 0.85 };
     let k = if front { 1.0 } else { 0.6 };
@@ -3383,7 +3474,7 @@ pub fn world(game: &Game, decor: &Decor, time: f32, flash: f32, light: &mut Ligh
     landing_lamps(game, time, light, vis);
     airlock(game, time, flash);
     for b in game.barriers() {
-        barrier_icon(px(b.pos), 1.0, b.hp / sc::stats::BARRIER_HP, 1.0);
+        barrier_icon(px(b.pos), 1.0, b.level, b.hp / b.max_hp, b.broken, 1.0);
     }
     towers(game);
     for e in enemies.iter().filter(|e| map.is_front(e.dist)) {
@@ -3596,7 +3687,8 @@ pub fn minimap(game: &Game, r: Rect, scroll: f32, time: f32) {
     draw_rectangle(sp.x - 4.0, sp.y - 3.0, 8.0, 6.0, sp_col);
     for b in game.barriers() {
         let p = to(b.pos);
-        draw_rectangle(p.x - 4.0, p.y - 1.5, 8.0, 3.0, rgb(200, 160, 110));
+        let col = if b.broken { rgb(110, 90, 70) } else { rgb(200, 160, 110) };
+        draw_rectangle(p.x - 4.0, p.y - 1.5, 8.0, 3.0, col);
     }
     let itp = to(sc::map::it_center());
     let it_col = if game.cameras_down() {

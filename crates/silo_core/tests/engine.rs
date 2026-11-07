@@ -333,6 +333,12 @@ fn fuzz_random_commands() {
                         barrier: g.barriers().get(r.below(g.barriers().len().max(1))).map_or(0, |b| b.id),
                     },
                     2 => Command::Upgrade { tower: r.below(g.towers().len() + 3) as u32 },
+                    5 if r.below(2) == 0 => Command::UpgradeBarrier {
+                        barrier: g.barriers().get(r.below(g.barriers().len().max(1))).map_or(0, |b| b.id),
+                    },
+                    5 => Command::Arrest {
+                        enemy: g.enemies().get(r.below(g.enemies().len().max(1))).map_or(0, |e| e.id),
+                    },
                     3 if r.below(4) == 0 => Command::Sell {
                         tower: g.towers().get(r.below(g.towers().len().max(1))).map_or(0, |t| t.id),
                     },
@@ -552,7 +558,7 @@ fn barrier_holds_rebels_until_broken() {
     while g.phase() == Phase::Wave {
         let before: Vec<(u32, f32)> = g.enemies().iter().map(|e| (e.id, e.dist)).collect();
         step_checked(&mut g);
-        let intact = g.barrier(id).is_some();
+        let intact = !g.barrier(id).unwrap().broken;
         for e in g.enemies() {
             if let Some(&(_, d0)) = before.iter().find(|(i, _)| *i == e.id)
                 && d0 < wall
@@ -574,6 +580,107 @@ fn barrier_holds_rebels_until_broken() {
     let t = broken_at.expect("bare hands never broke the barrier");
     assert!(t > 20.0, "broke the barrier too fast with bare hands: {t}s");
     assert_eq!(g.totals().barriers_broken, 1);
+    // The wreck stays put and IT rebuilds it once the wave is over.
+    let b = g.barrier(id).expect("wreck kept");
+    assert!(!b.broken && b.hp == b.max_hp, "rebuilt after the wave: {b:?}");
+}
+
+#[test]
+fn barrier_upgrades_raise_strength() {
+    let mut g = Game::new(0);
+    let id = g.place_barrier(4, 20).unwrap();
+    assert_eq!(g.barrier(id).unwrap().max_hp, barrier_hp(1));
+    assert_eq!(g.upgrade_barrier(id), Ok(2));
+    let b = g.barrier(id).unwrap();
+    assert_eq!((b.level, b.hp, b.max_hp), (2, barrier_hp(2), barrier_hp(2)));
+    assert_eq!(b.invested, BARRIER_COST + 50);
+    // 150 - 40 - 50 = 60 left: level 3 costs 80.
+    assert!(matches!(g.upgrade_barrier(id), Err(CommandError::NotEnoughChits { need: 80, .. })));
+    assert_eq!(barrier_upgrade_cost(3), None, "level 3 is the top");
+    assert!(barrier_hp(3) > barrier_hp(2) && barrier_hp(2) > barrier_hp(1));
+    assert_eq!(g.upgrade_barrier(999), Err(CommandError::NoSuchBarrier));
+    g.validate().unwrap();
+}
+
+#[test]
+fn broken_barrier_stops_blocking_and_cannot_be_upgraded() {
+    let mut g = Game::new(0);
+    let id = g.place_barrier(4, 20).unwrap();
+    g.send_wave().unwrap();
+    let mut saw_broken = false;
+    while g.phase() == Phase::Wave {
+        let was_broken = g.barrier(id).unwrap().broken;
+        step_checked(&mut g);
+        // (The step that ends the wave also rebuilds it.)
+        if was_broken && g.phase() == Phase::Wave {
+            saw_broken = true;
+            assert_eq!(g.barrier(id).unwrap().refund(), 0);
+            assert_eq!(g.upgrade_barrier(id), Err(CommandError::BarrierBroken));
+            assert!(g.enemies().iter().all(|e| !e.blocked), "a wreck blocked someone");
+        }
+    }
+    assert!(saw_broken);
+    let repaired = g.drain_events().into_iter().any(|e| matches!(e, Event::BarriersRepaired { rebuilt: 1 }));
+    assert!(repaired, "no repair event");
+}
+
+// ---------------------------------------------------------------- judicial
+
+#[test]
+fn arrest_removes_rebel_for_a_fee() {
+    let mut g = Game::new(0);
+    g.send_wave().unwrap();
+    while g.enemies().is_empty() {
+        step_checked(&mut g);
+    }
+    let e = g.enemies()[0].clone();
+    let cost = g.arrest_cost(&e);
+    assert_eq!(cost, arrest_cost(e.kind, 1));
+    let before = g.chits();
+    assert_eq!(g.arrest(e.id), Ok(cost));
+    assert_eq!(g.chits(), before - cost, "no bounty for arrests");
+    assert!(g.enemies().iter().all(|o| o.id != e.id));
+    assert_eq!(g.totals().arrests, 1);
+    assert_eq!(g.arrest(e.id), Err(CommandError::NoSuchEnemy));
+    assert!(g.drain_events().iter().any(|ev| matches!(ev, Event::Arrested { id, .. } if *id == e.id)));
+    g.validate().unwrap();
+}
+
+#[test]
+fn leaders_cost_three_times_and_broke_players_cannot_arrest() {
+    for w in [1, 10, 20] {
+        assert_eq!(arrest_cost(EnemyKind::Leader, w), 3 * arrest_cost(EnemyKind::Mechanic, w));
+    }
+    let mut g = Game::new(0);
+    // Spend down to nothing on barriers.
+    let spots: Vec<(i32, i32)> = (1..map::ROWS)
+        .flat_map(|r| (0..map::COLS).map(move |c| (c, r)))
+        .filter(|&(c, r)| g.map().barrier_allowed(c, r))
+        .collect();
+    for (c, r) in spots {
+        let _ = g.place_barrier(c, r);
+    }
+    assert!(g.chits() < BARRIER_COST);
+    g.send_wave().unwrap();
+    while g.enemies().is_empty() {
+        step_checked(&mut g);
+    }
+    // Keep calling Judicial until the money runs out; the failed call must cost nothing.
+    loop {
+        while g.enemies().is_empty() {
+            step_checked(&mut g);
+        }
+        let id = g.enemies()[0].id;
+        let before = g.chits();
+        match g.arrest(id) {
+            Ok(_) => continue,
+            Err(e) => {
+                assert!(matches!(e, CommandError::NotEnoughChits { .. }), "{e:?}");
+                assert_eq!(g.chits(), before);
+                break;
+            }
+        }
+    }
 }
 
 #[test]

@@ -2,6 +2,7 @@
 
 use crate::cleaning::Cleaning;
 use crate::fx::{Fx, Kind, PKind};
+use crate::judicial::Judicial;
 use crate::light::Lighting;
 use crate::music::Music;
 use crate::render::{self, *};
@@ -11,7 +12,7 @@ use macroquad::prelude::*;
 use silo_core as sc;
 use silo_core::bot::Bot;
 use silo_core::map::{SECTIONS, section_view_top};
-use silo_core::stats::{BARRIER_COST, BARRIER_HP, MAX_TOWER_LEVEL, MAX_WAVES, START_SEALS};
+use silo_core::stats::{BARRIER_COST, BARRIER_MAX_LEVEL, MAX_TOWER_LEVEL, MAX_WAVES, START_SEALS};
 use silo_core::{Event, Game, Phase, TICK, TowerKind};
 
 /// A press that started in the field: a short press is a tap, a vertical drag rolls the view.
@@ -46,6 +47,8 @@ fn nav_rects() -> (Rect, Rect, Rect) {
 enum Tool {
     Tower(TowerKind),
     Barrier,
+    /// Sims' agents: the next rebel tapped is arrested on the spot.
+    Arrest,
 }
 
 #[derive(PartialEq, Eq)]
@@ -62,6 +65,12 @@ pub struct App {
     build: Option<Tool>,
     selected: Option<sc::Id>,
     selected_barrier: Option<sc::Id>,
+    /// Rebel picked for arrest by Judicial.
+    selected_enemy: Option<sc::Id>,
+    /// Arrests in progress (Sims' agents marching rebels off).
+    judicial: Judicial,
+    /// The "Sims' agents can arrest rebels" hint was shown this game.
+    sims_hinted: bool,
     speed: u32,
     paused: bool,
     acc: f32,
@@ -120,6 +129,9 @@ impl App {
             build: None,
             selected: None,
             selected_barrier: None,
+            selected_enemy: None,
+            judicial: Judicial::default(),
+            sims_hinted: false,
             speed: 2,
             paused: false,
             acc: 0.0,
@@ -160,17 +172,21 @@ impl App {
             }
             // SILO_SHOT_BARRIERS=1: barricade a few stair tiles in Mids for the capture.
             if std::env::var("SILO_SHOT_BARRIERS").is_ok() {
-                for (c, r) in [(4, 16), (7, 18), (4, 20), (7, 22)] {
-                    let _ = app.game.place_barrier(c, r);
+                // Levels 3, 2, 1, 1 (upgrades only if the chits allow).
+                for (i, (c, r)) in [(4, 16), (7, 18), (4, 20), (7, 22)].into_iter().enumerate() {
+                    if let Ok(id) = app.game.place_barrier(c, r) {
+                        for _ in 0..[2, 1, 0, 0][i] {
+                            let _ = app.game.upgrade_barrier(id);
+                        }
+                    }
                 }
             }
-            // SILO_SHOT_CLEAN=D: send a cleaner from D tiles short of the airlock.
-            if let Some(d) = std::env::var("SILO_SHOT_CLEAN")
-                .ok()
-                .and_then(|v| v.parse::<f32>().ok())
-            {
+            // SILO_SHOT_CLEAN=D[,D..]: send cleaners from D tiles short of the airlock.
+            if let Ok(v) = std::env::var("SILO_SHOT_CLEAN") {
                 let len = app.game.map().length();
-                app.cleaning.send(app.game.map(), (len - d).max(0.0));
+                for d in v.split(',').filter_map(|d| d.parse::<f32>().ok()) {
+                    app.cleaning.send(app.game.map(), (len - d).max(0.0), true);
+                }
             }
             let view = std::env::var("SILO_SHOT_VIEW")
                 .ok()
@@ -256,6 +272,12 @@ impl App {
             }
             Event::TowerSold { .. } | Event::BarrierRemoved { .. } => self.sound(Sfx::Sell, None),
             Event::BarrierBroken { pos, .. } => self.sound(Sfx::BarrierBroken, Some(*pos)),
+            Event::BarrierUpgraded { id, .. } => {
+                let p = self.game.barrier(*id).map(|b| b.pos);
+                self.sound(Sfx::Upgrade, p);
+            }
+            Event::BarriersRepaired { .. } => {}
+            Event::Arrested { pos, .. } => self.sound(Sfx::Equip, Some(*pos)),
             Event::TowerDestroyed { pos, .. } => self.sound(Sfx::TowerDestroyed, Some(*pos)),
             Event::ItCollapsed { .. } => self.sound(Sfx::ItDown, None),
             Event::ItRestored => self.sound(Sfx::ItUp, Some(it_center())),
@@ -297,6 +319,9 @@ impl App {
         self.build = Some(Tool::Tower(TowerKind::Deputy));
         self.selected = None;
         self.selected_barrier = None;
+        self.selected_enemy = None;
+        self.judicial.clear();
+        self.sims_hinted = false;
         self.speed = 1;
         self.paused = false;
         self.acc = 0.0;
@@ -319,6 +344,29 @@ impl App {
         let dt = get_frame_time().min(0.1);
         self.time += dt;
         self.frame += 1;
+        // SILO_SHOT_ARREST=N: at frame N pick the rebel nearest the middle of the view, and
+        // arrest them 20 frames later (unless SILO_SHOT_ARREST_HOLD is set: panel shot).
+        if self.shot.is_some()
+            && let Some(n) = std::env::var("SILO_SHOT_ARREST")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+        {
+            if self.frame == n {
+                let mid = self.scroll + HUD_H + FIELD_H / 2.0;
+                self.selected_enemy = self
+                    .game
+                    .enemies()
+                    .iter()
+                    .filter(|e| self.game.is_visible(e.pos))
+                    .min_by(|a, b| {
+                        (px(a.pos).y - mid).abs().total_cmp(&(px(b.pos).y - mid).abs())
+                    })
+                    .map(|e| e.id);
+            }
+            if self.frame == n + 20 && std::env::var("SILO_SHOT_ARREST_HOLD").is_err() {
+                self.arrest_selected();
+            }
+        }
 
         // Letterboxed logical canvas of W x H.
         let (sw, sh) = (screen_width(), screen_height());
@@ -408,6 +456,7 @@ impl App {
         set_camera(&world_cam);
         self.cleaning.draw_sensor(self.time);
         self.fx.draw();
+        self.judicial.draw(&self.game, self.time);
         self.cleaning.draw(&self.game, self.time);
         self.field_overlays(&ui, world_pointer);
         render::darkness(&self.game, self.time);
@@ -477,6 +526,9 @@ impl App {
             return;
         }
         let gdt = dt * self.speed as f32;
+        for d in self.judicial.update(gdt) {
+            self.cleaning.send(self.game.map(), d, true);
+        }
         for w in self.cleaning.update(self.game.map(), gdt) {
             self.fx.add(
                 w - vec2(0.0, 6.0),
@@ -566,9 +618,38 @@ impl App {
         {
             self.selected_barrier = None;
         }
+        if self.selected_enemy.is_some_and(|id| {
+            !self
+                .game
+                .enemies()
+                .iter()
+                .any(|e| e.id == id && e.hp > 0.0 && self.game.is_visible(e.pos))
+        }) {
+            self.selected_enemy = None;
+        }
         for ev in self.game.drain_events() {
             self.event_sound(&ev);
             self.on_event(ev);
+        }
+        // Arrest mode only makes sense during a wave.
+        if self.build == Some(Tool::Arrest) && self.game.phase() != Phase::Wave {
+            self.build = None;
+        }
+        // First time rebels get close to the airlock, introduce Sims' agents.
+        if !self.sims_hinted
+            && self.screen == Screen::Playing
+            && self.game.phase() == Phase::Wave
+            && self.banner.is_none()
+            && self.rebels_near_airlock()
+        {
+            self.sims_hinted = true;
+            self.banner = Some((
+                "SIMS' AGENTS".into(),
+                "Rebels near the airlock! Tap one (or the SIMS' AGENTS card): Judicial \
+                 arrests them for chits and sends them to cleaning."
+                    .into(),
+                5.0,
+            ));
         }
         // Sledgehammers on barricades throw sparks.
         let hammering: Vec<sc::Vec2> = self
@@ -641,7 +722,7 @@ impl App {
                     // The flag goes down with them.
                     self.fx
                         .burst(PKind::Debris, p - vec2(0.0, 40.0), 8, 90.0, rgb(170, 30, 30));
-                    self.cleaning.send(self.game.map(), dist);
+                    self.cleaning.send(self.game.map(), dist, false);
                     if playing {
                         self.banner = Some((
                             "SENT TO CLEANING".into(),
@@ -785,6 +866,47 @@ impl App {
                     },
                 );
             }
+            Event::Arrested {
+                kind, pos, cost, ..
+            } => {
+                let p = px(pos);
+                let leader = kind == sc::EnemyKind::Leader;
+                self.fx.add(
+                    p - vec2(0.0, 44.0),
+                    1.4,
+                    Kind::Text {
+                        text: format!("SENT TO CLEANING -{cost}"),
+                        color: rgb(240, 210, 110),
+                    },
+                );
+                if leader && playing {
+                    self.banner = Some((
+                        "CAPTURED FOR CLEANING".into(),
+                        "Sims' agents take the flag-bearer alive.".into(),
+                        3.0,
+                    ));
+                }
+            }
+            Event::BarrierUpgraded { id, level } => {
+                if let Some(b) = self.game.barrier(id) {
+                    let p = px(b.pos);
+                    self.fx.add(p, 0.5, Kind::Ring { max_r: 30.0, color: rgb(250, 210, 80) });
+                    let name = if level == 2 { "SANDBAG WALL" } else { "RIOT GATE" };
+                    self.fx.add(
+                        p - vec2(0.0, 40.0),
+                        1.1,
+                        Kind::Text { text: name.into(), color: rgb(250, 210, 80) },
+                    );
+                }
+            }
+            Event::BarriersRepaired { rebuilt } if playing => {
+                if rebuilt > 0 {
+                    self.fx.toast(format!(
+                        "IT REBUILT {rebuilt} BARRIER{}",
+                        if rebuilt == 1 { "" } else { "S" }
+                    ));
+                }
+            }
             Event::BarrierBroken { pos, .. } => {
                 let p = px(pos);
                 self.fx
@@ -823,6 +945,40 @@ impl App {
             let r = self.game.upgrade(id);
             self.report(r);
         }
+        if let Some(id) = self.selected_barrier {
+            let r = self.game.upgrade_barrier(id);
+            self.report(r);
+        }
+    }
+
+    /// Pay Judicial to arrest the selected rebel.
+    fn arrest_selected(&mut self) {
+        let Some(id) = self.selected_enemy else { return };
+        let Some(e) = self.game.enemies().iter().find(|e| e.id == id).cloned() else {
+            return;
+        };
+        match self.game.arrest(id) {
+            Ok(_) => {
+                self.judicial.arrest(e);
+                self.selected_enemy = None;
+            }
+            Err(err) => self.report(Err::<(), _>(err)),
+        }
+    }
+
+    /// The living, visible rebel whose body is under world pixel `p`.
+    fn rebel_at(&self, p: Vec2) -> Option<sc::Id> {
+        self.game
+            .enemies()
+            .iter()
+            .filter(|e| e.hp > 0.0 && self.game.is_visible(e.pos))
+            .map(|e| {
+                let body = px(e.pos) + vec2(e.lane * TILE * 0.9, -22.0);
+                (e.id, body.distance(p))
+            })
+            .filter(|&(_, d)| d < 22.0)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(id, _)| id)
     }
 
     fn sell_selected(&mut self) {
@@ -857,6 +1013,17 @@ impl App {
             self.build = None;
             self.selected = None;
             self.selected_barrier = None;
+            self.selected_enemy = None;
+        }
+        if is_key_pressed(KeyCode::J) {
+            if self.selected_enemy.is_some() {
+                self.arrest_selected();
+            } else {
+                self.toggle_arrest_mode();
+            }
+        }
+        if is_key_pressed(KeyCode::U) {
+            self.upgrade_selected();
         }
         if is_key_pressed(KeyCode::N) || is_key_pressed(KeyCode::Space) {
             self.send_wave();
@@ -1026,6 +1193,7 @@ impl App {
         self.sound(Sfx::Click, None);
         self.selected = None;
         self.selected_barrier = None;
+        self.selected_enemy = None;
         self.build = if self.build == Some(k) { None } else { Some(k) };
     }
 
@@ -1095,6 +1263,29 @@ impl App {
         if self.game.is_over() {
             return;
         }
+        // Arrest mode: the tapped rebel is arrested right away.
+        if self.build == Some(Tool::Arrest) {
+            match self.rebel_at(p) {
+                Some(id) => {
+                    // Arrest on the spot; if it fails (e.g. no chits) just say why and stay
+                    // in Sims mode, without opening the rebel's panel over the tool cards.
+                    self.selected_enemy = Some(id);
+                    self.arrest_selected();
+                    self.selected_enemy = None;
+                }
+                None => self.fx.toast("TAP A REBEL ON THE STAIR"),
+            }
+            return;
+        }
+        // Rebels first: tapping one offers Judicial's arrest.
+        if let Some(id) = self.rebel_at(p) {
+            self.selected_enemy = Some(id);
+            self.selected = None;
+            self.selected_barrier = None;
+            self.build = None;
+            return;
+        }
+        self.selected_enemy = None;
         let Some((c, r)) = tile_at(p) else { return };
         if let Some(b) = self.game.barrier_at(c, r) {
             self.selected_barrier = Some(b.id);
@@ -1129,7 +1320,29 @@ impl App {
         }
         if let Some(b) = self.selected_barrier.and_then(|id| self.game.barrier(id)) {
             let c = px(b.pos);
-            draw_rectangle_lines(c.x - 24.0, c.y - 30.0, 48.0, 40.0, 2.5, WHITE);
+            draw_rectangle_lines(c.x - 25.0, c.y - 34.0, 50.0, 44.0, 2.5, WHITE);
+        }
+        let aim = if self.build == Some(Tool::Arrest) {
+            self.rebel_at(world_pointer)
+        } else {
+            None
+        };
+        if let Some(e) = self
+            .selected_enemy
+            .or(aim)
+            .and_then(|id| self.game.enemies().iter().find(|e| e.id == id))
+        {
+            // Judicial's crosshair on the rebel.
+            let c = px(e.pos) + vec2(e.lane * TILE * 0.9, -22.0);
+            let pulse = 1.0 + 0.08 * (self.time * 6.0).sin();
+            let r = 20.0 * pulse;
+            let col = rgb(255, 214, 90);
+            draw_circle_lines(c.x, c.y, r, 2.0, col);
+            for (dx, dy) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+                let d = vec2(dx, dy);
+                let (a, b) = (c + d * (r - 5.0), c + d * (r + 5.0));
+                draw_line(a.x, a.y, b.x, b.y, 2.0, col);
+            }
         }
         let (up, map, down) = nav_rects();
         let over_nav = [up, map, down].iter().any(|r| r.contains(ui.pointer));
@@ -1162,7 +1375,7 @@ impl App {
                 match self.game.map().barrier_dist(c, r) {
                     Some(d) => {
                         let p = px(self.game.map().pos_at(d));
-                        barrier_icon(p, 1.0, 1.0, 0.6);
+                        barrier_icon(p, 1.0, 1, 1.0, false, 0.6);
                         let col = if ok {
                             rgb(120, 230, 140)
                         } else {
@@ -1493,34 +1706,48 @@ impl App {
             .and_then(|id| self.game.barrier(id))
             .cloned()
         {
-            barrier_icon(vec2(48.0, y + 60.0), 1.4, b.hp / BARRIER_HP, 1.0);
-            text("BARRIER", 88.0, y + 42.0, 26.0, rgb(200, 160, 110));
-            text(
-                &format!(
-                    "HP {:.0}/{:.0}   LEVEL {}",
-                    b.hp,
-                    BARRIER_HP,
-                    sc::map::level_of_row(b.row)
-                ),
-                88.0,
-                y + 66.0,
-                16.0,
-                rgb(200, 200, 200),
-            );
-            let info = "Rebels must break it to climb on. Bare hands take ages; \
-                        tools from Supply smash it in seconds.";
+            barrier_icon(vec2(48.0, y + 66.0), 1.3, b.level, b.hp / b.max_hp, b.broken, 1.0);
+            let name = match b.level {
+                1 => "BARRICADE",
+                2 => "SANDBAG WALL",
+                _ => "RIOT GATE",
+            };
+            text(name, 88.0, y + 42.0, 24.0, rgb(200, 160, 110));
+            let status = if b.broken {
+                format!("WRECKED   LEVEL {}/{}", b.level, BARRIER_MAX_LEVEL)
+            } else {
+                format!("HP {:.0}/{:.0}   LEVEL {}/{}", b.hp, b.max_hp, b.level, BARRIER_MAX_LEVEL)
+            };
+            text(&status, 88.0, y + 66.0, 16.0, rgb(200, 200, 200));
+            let info = if b.broken {
+                "Smashed. It no longer holds anyone back; IT rebuilds it once this wave is over."
+            } else {
+                "Rebels must break it to climb on. Bare hands take ages; tools from Supply \
+                 smash it in seconds. Repaired after every wave."
+            };
             for (i, l) in wrap(info, 15.0, 330.0).iter().enumerate() {
-                text(
-                    l,
-                    20.0,
-                    y + 104.0 + i as f32 * 20.0,
-                    15.0,
-                    rgb(170, 170, 176),
-                );
+                text(l, 20.0, y + 104.0 + i as f32 * 20.0, 15.0, rgb(170, 170, 176));
+            }
+            let up = b.upgrade_cost();
+            let up_label = if b.broken {
+                "REBUILDING".to_string()
+            } else {
+                up.map_or("MAX LEVEL".to_string(), |c| format!("UPGRADE {c}"))
+            };
+            let can_up = !b.broken
+                && up.is_some_and(|c| c <= self.game.chits())
+                && !self.game.is_over();
+            if ui.button(
+                Rect::new(372.0, y + 14.0, 160.0, 70.0),
+                &[&up_label],
+                can_up,
+                rgb(110, 200, 120),
+            ) {
+                self.upgrade_selected();
             }
             let label = format!("REMOVE +{}", b.refund());
             if ui.button(
-                Rect::new(372.0, y + 14.0, 160.0, 148.0),
+                Rect::new(372.0, y + 92.0, 160.0, 70.0),
                 &[&label],
                 !self.game.is_over(),
                 rgb(220, 120, 90),
@@ -1534,6 +1761,68 @@ impl App {
                 rgb(150, 150, 160),
             ) {
                 self.selected_barrier = None;
+            }
+            ui.hit(Rect::new(0.0, y, W, PANEL_H));
+            return;
+        }
+
+        if let Some(e) = self
+            .selected_enemy
+            .and_then(|id| self.game.enemies().iter().find(|e| e.id == id))
+            .cloned()
+        {
+            let leader = e.kind == sc::EnemyKind::Leader;
+            // Draw the rebel in the panel, standing on a small plinth.
+            let foot = vec2(48.0, y + 96.0);
+            draw_ellipse(foot.x, foot.y, 24.0, 5.0, 0.0, rgb(40, 42, 48));
+            let mut shown = e.clone();
+            // `rebel` stands the figure 4 px above px(pos): place pos so its feet land here.
+            shown.pos = sc::vec2(foot.x / TILE, (foot.y + 4.0 - HUD_H) / TILE);
+            shown.lane = 0.0;
+            shown.blocked = true;
+            render::rebel(&shown, true, self.time);
+            text(e.kind.name(), 88.0, y + 42.0, 24.0, rgb(240, 170, 120));
+            let mut tags = vec![format!("HP {:.0}/{:.0}", e.hp, e.max_hp)];
+            if e.armed {
+                tags.push("ARMED".into());
+            }
+            if e.tools {
+                tags.push("TOOLS".into());
+            }
+            text(&tags.join("   "), 88.0, y + 66.0, 16.0, rgb(200, 200, 200));
+            let info = if leader {
+                "Carries the flag. Sims' agents take them alive at three times the price, \
+                 and march them to cleaning."
+            } else {
+                "Pay Judicial: one of Sims' agents arrests them on the stair and marches \
+                 them to cleaning. No bounty for arrests."
+            };
+            for (i, l) in wrap(info, 15.0, 330.0).iter().enumerate() {
+                text(l, 20.0, y + 112.0 + i as f32 * 20.0, 15.0, rgb(170, 170, 176));
+            }
+            let cost = self.game.arrest_cost(&e);
+            let can = cost <= self.game.chits() && !self.game.is_over();
+            let lines: Vec<String> = if leader {
+                vec!["CAPTURE".into(), "FOR CLEANING".into(), format!("{cost}")]
+            } else {
+                vec!["ARREST".into(), "FOR CLEANING".into(), format!("{cost}")]
+            };
+            let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+            if ui.button(
+                Rect::new(372.0, y + 14.0, 160.0, 148.0),
+                &refs,
+                can,
+                rgb(240, 200, 90),
+            ) {
+                self.arrest_selected();
+            }
+            if ui.button(
+                Rect::new(540.0, y + 14.0, 124.0, 148.0),
+                &["BACK"],
+                true,
+                rgb(150, 150, 160),
+            ) {
+                self.selected_enemy = None;
             }
             ui.hit(Rect::new(0.0, y, W, PANEL_H));
             return;
@@ -1605,9 +1894,11 @@ impl App {
             };
             panel(r, fill, if sel { col } else { rgb(60, 62, 68) });
             barrier_icon(
-                vec2(r.x + r.w / 2.0, r.y + 54.0),
+                vec2(r.x + r.w / 2.0, r.y + 58.0),
                 1.2,
+                1,
                 1.0,
+                false,
                 if afford { 1.0 } else { 0.4 },
             );
             text_centered(
@@ -1643,6 +1934,12 @@ impl App {
         }
         let r = Rect::new(560.0, y + 12.0, 104.0, 152.0);
         let building = self.game.phase() == Phase::Building;
+        if self.game.phase() == Phase::Wave {
+            // During a wave this slot calls Sims' agents.
+            self.sims_card(ui, r);
+            ui.hit(Rect::new(0.0, y, W, PANEL_H));
+            return;
+        }
         let next = format!("WAVE {}", self.game.wave() + 1);
         let lines: Vec<&str> = if building {
             vec!["SEND", &next]
@@ -1653,6 +1950,69 @@ impl App {
             self.send_wave();
         }
         ui.hit(Rect::new(0.0, y, W, PANEL_H));
+    }
+
+    /// Are rebels close to the airlock (in Up Top, where the cameras can see them)?
+    fn rebels_near_airlock(&self) -> bool {
+        let up_top_last = SECTIONS[0].2 as f32;
+        self.game
+            .enemies()
+            .iter()
+            .any(|e| e.pos.y <= up_top_last && self.game.is_visible(e.pos))
+    }
+
+    /// The Judicial card: arm arrest mode. Pulses when rebels near the airlock.
+    fn sims_card(&mut self, ui: &mut Ui, r: Rect) {
+        let sel = self.build == Some(Tool::Arrest);
+        let base = sc::stats::arrest_cost(sc::EnemyKind::Porter, self.game.wave());
+        let afford = self.game.chits() >= base;
+        let accent = rgb(240, 200, 90);
+        let urgent = self.rebels_near_airlock();
+        let pulse = if urgent && !sel { 0.5 + 0.5 * (self.time * 6.0).sin() } else { 0.0 };
+        let fill = if sel {
+            shade(accent, 0.4)
+        } else if ui.hovered(r) {
+            rgb(36, 38, 44)
+        } else {
+            rgb(28, 30, 34)
+        };
+        let border = if sel {
+            accent
+        } else if urgent {
+            Color::new(1.0, 0.85 * pulse + 0.15, 0.3, 1.0)
+        } else {
+            rgb(60, 62, 68)
+        };
+        panel(r, fill, border);
+        if urgent && !sel {
+            draw_rectangle_lines(r.x - 2.0, r.y - 2.0, r.w + 4.0, r.h + 4.0, 2.0, with_alpha(accent, pulse));
+        }
+        crate::judicial::agent_icon(vec2(r.x + r.w / 2.0 - 6.0, r.y + 80.0), 2.2, if afford { 1.0 } else { 0.45 });
+        let fg = if afford { WHITE } else { rgb(120, 120, 120) };
+        text_centered("SIMS'", r.x + r.w / 2.0, r.y + 98.0, 15.0, fg);
+        text_centered("AGENTS", r.x + r.w / 2.0, r.y + 114.0, 15.0, fg);
+        let cost_col = if afford { rgb(250, 210, 80) } else { rgb(255, 120, 90) };
+        text_centered(&format!("ARREST {base}+"), r.x + r.w / 2.0, r.y + 136.0, 14.0, cost_col);
+        text("J", r.x + 8.0, r.y + 20.0, 14.0, rgb(110, 110, 116));
+        if ui.hit(r) {
+            self.toggle_arrest_mode();
+        }
+    }
+
+    fn toggle_arrest_mode(&mut self) {
+        if self.game.phase() != Phase::Wave {
+            return;
+        }
+        self.sound(Sfx::Click, None);
+        self.selected = None;
+        self.selected_barrier = None;
+        self.selected_enemy = None;
+        if self.build == Some(Tool::Arrest) {
+            self.build = None;
+        } else {
+            self.build = Some(Tool::Arrest);
+            self.fx.toast("TAP A REBEL: SIMS' AGENTS ARREST THEM");
+        }
     }
 
     fn title(&mut self, ui: &mut Ui) {

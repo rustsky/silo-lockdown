@@ -226,7 +226,17 @@ impl App {
     fn act_at_cursor(&mut self) {
         let (c, r) = self.cursor;
         if let Some(b) = self.game.barrier_at(c, r) {
-            let msg = format!("Barrier {:.0}/{:.0}. [x] removes it for {}.", b.hp, stats::BARRIER_HP, b.refund());
+            let msg = if b.broken {
+                "Barrier wrecked; IT rebuilds it after the wave.".to_string()
+            } else {
+                format!(
+                    "Barrier L{} {:.0}/{:.0}. [u] upgrades, [x] removes it for {}.",
+                    b.level,
+                    b.hp,
+                    b.max_hp,
+                    b.refund()
+                )
+            };
             self.say(Line::from(msg));
         } else if self.game.tower_at(c, r).is_some() {
             self.upgrade_at_cursor();
@@ -242,9 +252,14 @@ impl App {
     }
 
     fn upgrade_at_cursor(&mut self) {
-        let res = match self.game.tower_at(self.cursor.0, self.cursor.1) {
-            Some(t) => self.game.upgrade(t.id).map(|_| ()),
-            None => Err(CommandError::NoSuchTower),
+        let res = if let Some(b) = self.game.barrier_at(self.cursor.0, self.cursor.1) {
+            let id = b.id;
+            self.game.upgrade_barrier(id).map(|_| ())
+        } else {
+            match self.game.tower_at(self.cursor.0, self.cursor.1) {
+                Some(t) => self.game.upgrade(t.id).map(|_| ()),
+                None => Err(CommandError::NoSuchTower),
+            }
         };
         self.report(res);
     }
@@ -564,7 +579,14 @@ impl App {
         let mut lines = vec![];
         if let Some(b) = g.barrier_at(c, r) {
             lines.push(Line::from(Span::styled("Barrier", Style::new().fg(BARRIER_FG).bold())));
-            lines.push(Line::from(format!("hp {:.0}/{:.0}", b.hp, stats::BARRIER_HP)));
+            if b.broken {
+                lines.push(Line::from("wrecked: rebuilt after the wave".red()));
+            } else {
+                lines.push(Line::from(format!("level {}  hp {:.0}/{:.0}", b.level, b.hp, b.max_hp)));
+                if let Some(c) = b.upgrade_cost() {
+                    lines.push(Line::from(vec!["[u] upgrade for ".into(), format!("{c}").yellow()]));
+                }
+            }
             lines.push(Line::from("Bare hands barely dent it; tools from Supply smash it.".dark_gray()));
             lines.push(Line::from(vec!["[x] remove for ".into(), format!("{}", b.refund()).yellow()]));
         } else if let Some(t) = g.tower_at(c, r) {
@@ -952,8 +974,16 @@ impl Widget for FieldView<'_> {
         // Barriers across the stair.
         for b in g.barriers() {
             let (x, y) = to_cell(b.pos);
-            let f = b.hp / stats::BARRIER_HP;
-            let ch = if f > 0.66 { '▓' } else if f > 0.33 { '▒' } else { '░' };
+            let f = b.hp / b.max_hp;
+            let ch = if b.broken {
+                '·'
+            } else if f > 0.66 {
+                '▓'
+            } else if f > 0.33 {
+                '▒'
+            } else {
+                '░'
+            };
             for dx in -1..=1 {
                 put(buf, x + dx, y, ch, Style::new().fg(BARRIER_FG).bg(Color::Rgb(50, 38, 24)).bold());
             }

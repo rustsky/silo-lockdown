@@ -1,8 +1,9 @@
 //! "Sent to cleaning": a downed rebel leader is put in a cleaning suit, climbs the stair to
 //! the airlock, walks out onto the surface, wipes the sensor lens, and collapses in the toxic
-//! air. Purely cosmetic; the engine has already removed the leader.
+//! air. Their bodies stay on the surface for the rest of the game. Purely cosmetic; the engine
+//! has already removed the leader.
 
-use crate::render::{px, HUD_H, TILE};
+use crate::render::{px, HUD_H, TILE, W};
 use crate::ui::*;
 use macroquad::prelude::*;
 use silo_core as sc;
@@ -46,6 +47,11 @@ struct Cleaner {
     speed: f32,
     /// Surface x once outside.
     x: f32,
+    /// Where they will fall, and which way they walk there.
+    rest_x: f32,
+    facing: f32,
+    /// Arrested by Judicial: an agent marches them up to the airlock.
+    escorted: bool,
 }
 
 pub struct Cleaning {
@@ -66,24 +72,58 @@ impl Default for Cleaning {
 const OUT_T: f32 = 0.9;
 const WALK_SPEED: f32 = 34.0;
 const WIPE_T: f32 = 3.2;
-const LEAVE_DX: f32 = 46.0;
 const FALL_T: f32 = 0.8;
-const LIE_T: f32 = 5.0;
-const FADE_T: f32 = 1.5;
+/// Bodies kept on the surface; past this the oldest one is buried under the dust.
+const MAX_BODIES: usize = 24;
 
 impl Cleaning {
-    /// Send the leader who fell `dist` tiles along the path to cleaning.
-    pub fn send(&mut self, map: &sc::Map, dist: f32) {
+    /// Send the rebel at `dist` tiles along the path to cleaning; `escorted` when one of
+    /// Sims' agents marches them up.
+    pub fn send(&mut self, map: &sc::Map, dist: f32, escorted: bool) {
         let left = (map.length() - dist).max(0.0);
         // Marched up briskly: never longer than ~12 s, however deep they fell.
         let dur = (left / 3.0).clamp(2.0, 12.0);
+        let rest_x = self.free_spot();
+        let wipe_x = lens_x() - 9.0;
         self.list.push(Cleaner {
             stage: Stage::Climb,
             t: 0.0,
             dist,
             speed: left / dur,
             x: door_x(),
+            rest_x,
+            facing: if rest_x >= wipe_x { 1.0 } else { -1.0 },
+            escorted,
         });
+        // Too many bodies: the oldest is lost to the dust.
+        let lying = self.list.iter().filter(|c| c.stage == Stage::Lie).count();
+        if lying > MAX_BODIES
+            && let Some(i) = self.list.iter().position(|c| c.stage == Stage::Lie)
+        {
+            self.list.remove(i);
+        }
+    }
+
+    /// A spot on open ground (either side of the bunker) away from earlier bodies.
+    fn free_spot(&self) -> f32 {
+        use macroquad::rand::gen_range;
+        let taken: Vec<f32> = self.list.iter().map(|c| c.rest_x).collect();
+        let mut best = (0.0, -1.0);
+        for _ in 0..12 {
+            let x = if gen_range(0, 3) == 0 {
+                gen_range(26.0, door_x() - 112.0)
+            } else {
+                gen_range(lens_x() + 26.0, W - 64.0)
+            };
+            let gap = taken.iter().map(|t| (t - x).abs()).fold(f32::MAX, f32::min);
+            if gap > best.1 {
+                best = (x, gap);
+            }
+            if gap > 30.0 {
+                break;
+            }
+        }
+        best.0
     }
 
     pub fn clear(&mut self) {
@@ -127,8 +167,9 @@ impl Cleaning {
                 }
                 Stage::Leave => {
                     // Slowing down: the suit is failing.
-                    c.x += WALK_SPEED * 0.55 * (1.0 - c.t / 4.0).max(0.25) * dt;
-                    if c.x >= lens_x() - 9.0 + LEAVE_DX {
+                    c.x += c.facing * WALK_SPEED * 0.6 * (1.0 - c.t / 6.0).max(0.3) * dt;
+                    if (c.rest_x - c.x) * c.facing <= 0.0 {
+                        c.x = c.rest_x;
                         c.stage = Stage::Fall;
                         c.t = 0.0;
                     }
@@ -140,8 +181,6 @@ impl Cleaning {
                 _ => {}
             }
         }
-        self.list
-            .retain(|c| !(c.stage == Stage::Lie && c.t >= LIE_T + FADE_T));
         wiped
     }
 
@@ -190,6 +229,15 @@ impl Cleaning {
                     let s = if front { 1.45 } else { 1.25 };
                     let alpha = if front { 1.0 } else { 0.8 };
                     suit(foot, s, facing, c.dist * 9.0, 0.0, None, alpha);
+                    if c.escorted {
+                        // The agent a step behind, hand on the prisoner's shoulder.
+                        let back = map.pos_at((c.dist - 0.45).max(0.0));
+                        if game.is_visible(back) {
+                            let af = px(back) + vec2(0.0, -4.0);
+                            let k = if front { 1.5 } else { 1.3 };
+                            crate::judicial::escort(af, k, facing, c.dist * 9.0 + 1.5, alpha, foot);
+                        }
+                    }
                 }
                 _ => {
                     let foot = vec2(c.x, ground());
@@ -207,16 +255,21 @@ impl Cleaning {
                             let wobble = (time * 5.0).sin() * 0.12;
                             (c.x * 0.25, wobble, None, 1.0)
                         }
+                        // The body stays where it fell.
+                        Stage::Lie => (0.0, PI / 2.0, None, 1.0),
                         Stage::Fall => {
                             let k = (c.t / FALL_T).min(1.0);
                             (0.0, k * k * PI / 2.0, None, 1.0)
                         }
-                        _ => {
-                            let fade = 1.0 - ((c.t - LIE_T) / FADE_T).clamp(0.0, 1.0);
-                            (0.0, PI / 2.0, None, fade)
-                        }
+                        Stage::Climb => unreachable!(),
                     };
-                    suit(foot, 1.45, 1.0, phase, tilt, hand, alpha);
+                    // Out to the sensor facing right; afterwards toward where they'll fall.
+                    let facing = if matches!(c.stage, Stage::Leave | Stage::Fall | Stage::Lie) {
+                        c.facing
+                    } else {
+                        1.0
+                    };
+                    suit(foot, 1.45, facing, phase, tilt, hand, alpha);
                 }
             }
         }

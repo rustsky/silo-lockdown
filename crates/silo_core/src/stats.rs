@@ -15,6 +15,33 @@ pub const SUPPLY_JOINS_WAVE: u32 = 6;
 /// Barriers: built on the stair above Supply; rebels must break them to climb on.
 pub const BARRIER_COST: u32 = 40;
 pub const BARRIER_HP: f32 = 200.0;
+pub const BARRIER_MAX_LEVEL: u8 = 3;
+
+/// Barrier strength at `level`: planks and crates, then sandbags and steel sheet, then a
+/// welded riot gate.
+pub fn barrier_hp(level: u8) -> f32 {
+    match level {
+        0 | 1 => BARRIER_HP,
+        2 => 450.0,
+        _ => 800.0,
+    }
+}
+
+/// Cost to raise a barrier from `level` to the next, if it can go higher.
+pub fn barrier_upgrade_cost(level: u8) -> Option<u32> {
+    match level {
+        1 => Some(50),
+        2 => Some(80),
+        _ => None,
+    }
+}
+
+/// Judicial (Sims' agents) will arrest a rebel on the stair for a fee that rises with the war.
+/// A flag-carrying leader costs three times as much; they are sent to cleaning.
+pub fn arrest_cost(kind: EnemyKind, wave: u32) -> u32 {
+    let base = 25 + 2 * wave;
+    if kind == EnemyKind::Leader { base * 3 } else { base }
+}
 /// Barrier damage per second: bare hands, or tools from Supply.
 pub const FIST_DPS: f32 = 1.0;
 pub const TOOLS_DPS: f32 = 25.0;
