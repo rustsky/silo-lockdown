@@ -332,7 +332,7 @@ pub fn silo(game: &Game, decor: &Decor, time: f32, light: &mut Lighting, vis: Vi
         for c in 0..COLS {
             if !matches!(
                 map.tile(c, r),
-                Tile::Floor | Tile::ItRoom | Tile::SupplyRoom
+                Tile::Floor | Tile::ItRoom | Tile::SupplyRoom | Tile::PowerRoom
             ) {
                 continue;
             }
@@ -2695,6 +2695,119 @@ fn it_room(game: &Game, time: f32) {
 /// Supply's depot: a two-storey corrugated-steel warehouse with pallet racking, a ceiling hoist,
 /// a wire weapons cage and a roll-up shutter. Once Supply joins the uprising the shutter is up,
 /// the cage stands open and half empty, and the walls carry the rebels' paint.
+/// The main generator hall at the bottom of the Down Deep: steel plating, copper pipes, a big
+/// generator with glowing coils, a pumping piston and a spinning flywheel, and gauges.
+/// Every uprising rallies in front of it.
+fn power_room(time: f32, light: &mut Lighting) {
+    let r = room_rect(&sc::map::POWER_ROOM);
+    let fl = r.y + r.h;
+    // Riveted steel plates.
+    let (pw, ph): (f32, f32) = (28.0, 26.0);
+    let mut y = r.y;
+    let mut row = 0;
+    while y < fl {
+        let mut x = r.x;
+        let mut k = row;
+        while x < r.x + r.w {
+            let c = if k % 2 == 0 { rgb(58, 60, 62) } else { rgb(50, 52, 55) };
+            let w = pw.min(r.x + r.w - x);
+            let h = ph.min(fl - y);
+            draw_rectangle(x, y, w, h, c);
+            draw_rectangle_lines(x, y, w, h, 1.0, rgb(36, 38, 40));
+            for (dx, dy) in [(3.0, 3.0), (w - 3.0, 3.0), (3.0, h - 3.0), (w - 3.0, h - 3.0)] {
+                draw_circle(x + dx, y + dy, 0.8, rgb(96, 98, 100));
+            }
+            x += pw;
+            k += 1;
+        }
+        y += ph;
+        row += 1;
+    }
+    // Copper pipes up the back wall, with a valve wheel.
+    for (px_, w) in [(r.x + 9.0, 5.0), (r.x + 17.0, 3.0)] {
+        draw_rectangle(px_, r.y + 18.0, w, fl - r.y - 18.0, rgb(150, 92, 52));
+        draw_rectangle(px_ + 1.0, r.y + 18.0, 1.0, fl - r.y - 18.0, rgb(214, 150, 96));
+    }
+    let vw = vec2(r.x + 11.5, r.y + 44.0);
+    draw_circle_lines(vw.x, vw.y, 5.0, 1.5, rgb(200, 50, 40));
+    for i in 0..4 {
+        let a = i as f32 * PI / 2.0 + 0.4;
+        draw_line(vw.x, vw.y, vw.x + a.cos() * 5.0, vw.y + a.sin() * 5.0, 1.0, rgb(200, 50, 40));
+    }
+    // Gauges.
+    for (i, gx) in [r.x + 40.0, r.x + 58.0, r.x + 76.0].iter().enumerate() {
+        let c = vec2(*gx, r.y + 32.0);
+        draw_circle(c.x, c.y, 6.0, rgb(30, 30, 32));
+        draw_circle(c.x, c.y, 5.0, rgb(226, 222, 206));
+        draw_line(c.x - 3.5, c.y + 2.0, c.x - 2.0, c.y + 1.0, 1.4, rgb(60, 160, 70));
+        draw_line(c.x + 3.5, c.y + 2.0, c.x + 2.0, c.y + 1.0, 1.4, rgb(200, 50, 40));
+        let a = -PI * 0.75 + (0.6 + 0.35 * (time * (1.3 + i as f32 * 0.7)).sin()) * PI * 1.5 / 1.0;
+        draw_line(c.x, c.y, c.x + a.cos() * 4.0, c.y + a.sin() * 4.0, 1.0, rgb(20, 20, 20));
+    }
+    // Danger sign with a lightning bolt.
+    let sg = vec2(r.x + r.w - 16.0, r.y + 32.0);
+    draw_triangle(sg + vec2(0.0, -7.0), sg + vec2(-7.0, 5.0), sg + vec2(7.0, 5.0), rgb(230, 190, 40));
+    draw_triangle(sg + vec2(0.0, -5.0), sg + vec2(-5.0, 3.6), sg + vec2(5.0, 3.6), rgb(30, 30, 30));
+    draw_line(sg.x + 1.0, sg.y - 3.0, sg.x - 1.5, sg.y + 1.0, 1.2, rgb(230, 190, 40));
+    draw_line(sg.x - 1.5, sg.y + 1.0, sg.x + 1.5, sg.y + 0.5, 1.2, rgb(230, 190, 40));
+    draw_line(sg.x + 1.5, sg.y + 0.5, sg.x - 1.0, sg.y + 3.5, 1.2, rgb(230, 190, 40));
+
+    // The generator: a long housing on a plinth...
+    let base = Rect::new(r.x + 22.0, fl - 8.0, 76.0, 8.0);
+    draw_rectangle(base.x, base.y, base.w, base.h, rgb(40, 42, 44));
+    draw_rectangle(base.x, base.y, base.w, 1.5, rgb(90, 92, 96));
+    let body = Rect::new(r.x + 24.0, fl - 40.0, 54.0, 32.0);
+    draw_rectangle(body.x, body.y, body.w, body.h, rgb(64, 86, 76));
+    draw_circle(body.x, body.y + body.h / 2.0, body.h / 2.0, rgb(56, 76, 66));
+    draw_rectangle(body.x, body.y + 3.0, body.w, 3.0, rgb(104, 132, 118));
+    draw_rectangle(body.x, body.y + body.h - 5.0, body.w, 3.0, rgb(44, 60, 52));
+    // ...copper coil bands that glow with the load...
+    let glow = 0.55 + 0.45 * (time * 3.1).sin().abs();
+    for i in 0..5 {
+        let x = body.x + 8.0 + i as f32 * 9.0;
+        draw_rectangle(x, body.y, 4.0, body.h, rgb(170, 100, 50));
+        draw_rectangle(x + 1.0, body.y + 2.0, 2.0, body.h - 4.0, Color::new(1.0, 0.62, 0.25, glow));
+    }
+    light.add(
+        vec2(body.x + body.w / 2.0, body.y + body.h / 2.0),
+        70.0,
+        Color::new(1.0, 0.6, 0.3, 0.45 * glow),
+    );
+    // ...a piston pumping on top...
+    let stroke = (time * 7.0).sin() * 5.0;
+    draw_rectangle(body.x + 30.0, body.y - 14.0, 10.0, 14.0, rgb(80, 82, 86));
+    draw_rectangle(body.x + 33.0, body.y - 24.0 + stroke, 4.0, 14.0, rgb(180, 184, 190));
+    draw_rectangle(body.x + 31.0, body.y - 26.0 + stroke, 8.0, 3.0, rgb(120, 124, 130));
+    // ...an exhaust stack to the ceiling...
+    draw_rectangle(body.x + 8.0, r.y + 18.0, 6.0, body.y - r.y - 18.0, rgb(70, 72, 76));
+    draw_rectangle(body.x + 9.0, r.y + 18.0, 1.5, body.y - r.y - 18.0, rgb(120, 122, 126));
+    // ...and the flywheel spinning at the end.
+    let fw = vec2(body.x + body.w + 10.0, fl - 24.0);
+    draw_circle(fw.x, fw.y, 17.0, rgb(30, 32, 34));
+    draw_circle_lines(fw.x, fw.y, 17.0, 3.0, rgb(110, 114, 120));
+    let spin = time * 5.0;
+    for i in 0..6 {
+        let a = spin + i as f32 * PI / 3.0;
+        let d = vec2(a.cos(), a.sin());
+        draw_line(fw.x, fw.y, fw.x + d.x * 15.0, fw.y + d.y * 15.0, 2.0, rgb(140, 144, 150));
+    }
+    // Motion blur ring and hub.
+    draw_circle_lines(fw.x, fw.y, 10.0, 6.0, rgba(140, 144, 150, 50));
+    draw_circle(fw.x, fw.y, 4.0, rgb(200, 170, 60));
+    draw_line(body.x + body.w, fw.y, fw.x, fw.y, 3.0, rgb(150, 154, 160));
+    // Hazard strip along the floor.
+    let mut hx = r.x;
+    let mut k = 0;
+    while hx < r.x + r.w {
+        let c = if k % 2 == 0 { rgb(230, 190, 40) } else { rgb(30, 30, 30) };
+        draw_triangle(vec2(hx, fl), vec2(hx + 6.0, fl - 3.0), vec2(hx + 6.0, fl), c);
+        draw_triangle(vec2(hx, fl), vec2(hx, fl - 3.0), vec2(hx + 6.0, fl - 3.0), c);
+        hx += 6.0;
+        k += 1;
+    }
+    facade(r, rgb(230, 190, 40), "GENERATOR", "", rgb(240, 210, 120));
+}
+
 fn supply_room(game: &Game, time: f32) {
     let r = room_rect(&sc::map::SUPPLY_ROOM);
     let joined = game.supply_joined();
@@ -3449,8 +3562,9 @@ pub fn world(game: &Game, decor: &Decor, time: f32, flash: f32, light: &mut Ligh
     silo(game, decor, time, light, vis);
     it_room(game, time);
     supply_room(game, time);
-    // ...and the two key rooms ignore the gloom entirely.
-    for tiles in [&sc::map::IT_ROOM[..], &sc::map::SUPPLY_ROOM[..]] {
+    power_room(time, light);
+    // ...and the key rooms ignore the gloom entirely.
+    for tiles in [&sc::map::IT_ROOM[..], &sc::map::SUPPLY_ROOM[..], &sc::map::POWER_ROOM[..]] {
         let r = room_rect(tiles);
         light.fullbright.push(Rect::new(r.x, r.y, r.w, r.h + 8.0));
     }

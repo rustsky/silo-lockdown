@@ -45,6 +45,8 @@ pub fn arrest_cost(kind: EnemyKind, wave: u32) -> u32 {
 /// Barrier damage per second: bare hands, or tools from Supply.
 pub const FIST_DPS: f32 = 1.0;
 pub const TOOLS_DPS: f32 = 25.0;
+/// Each wave opens with a rally at the generator hall: the first rebel leaves after this long.
+pub const RALLY_TIME: f32 = 3.5;
 /// From this wave on, rebels cut the main power during waves: a whole section goes dark.
 pub const POWER_CUT_WAVE: u32 = 15;
 

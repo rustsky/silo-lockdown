@@ -11,6 +11,7 @@ mod render;
 mod sfx;
 mod synth;
 mod ui;
+mod uprising;
 
 use macroquad::experimental::coroutines::start_coroutine;
 use macroquad::prelude::*;

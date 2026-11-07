@@ -182,11 +182,21 @@ fn jammer_slows_enemies() {
     let travel = |with_jammer: bool| -> f32 {
         let mut g = Game::new(0);
         if with_jammer {
-            g.place(TowerKind::Jammer, 2, 36).unwrap();
+            // The buildable tile closest to where the stair starts.
+            let start = g.map().pos_at(0.0);
+            let (c, r) = (0..map::COLS)
+                .flat_map(|c| (0..map::ROWS).map(move |r| (c, r)))
+                .filter(|&(c, r)| g.map().buildable(c, r))
+                .min_by(|a, b| {
+                    let d = |&(c, r): &(i32, i32)| map::tile_center(c, r).distance(start);
+                    d(a).total_cmp(&d(b))
+                })
+                .unwrap();
+            g.place(TowerKind::Jammer, c, r).unwrap();
         }
         g.send_wave().unwrap();
         let mut slowed = false;
-        for _ in 0..(30 * 4) {
+        for _ in 0..((RALLY_TIME + 4.0) * 30.0) as u32 {
             g.step();
             slowed |= g.enemies().iter().any(|e| e.is_slowed());
         }

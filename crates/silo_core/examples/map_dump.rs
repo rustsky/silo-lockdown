@@ -16,6 +16,7 @@ fn main() {
                 Tile::Floor => '_',
                 Tile::ItRoom => 'I',
                 Tile::SupplyRoom => '$',
+                Tile::PowerRoom => 'P',
                 Tile::OffMap => ' ',
             })
             .collect();

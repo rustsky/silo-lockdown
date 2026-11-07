@@ -77,6 +77,14 @@ pub fn supply_center() -> Vec2 {
     vec2(10.0, 27.0)
 }
 
+/// The main generator hall at the very bottom of the Down Deep (two floors, left of the shaft,
+/// right where the stair begins). Every uprising starts here.
+pub const POWER_ROOM: [(i32, i32); 4] = [(1, 35), (2, 35), (1, 36), (2, 36)];
+
+pub fn power_center() -> Vec2 {
+    vec2(2.0, 36.0)
+}
+
 /// What each level of the silo is used for: (first row, last row, left side, right side).
 /// Covers every underground row exactly once; IT and Supply sit where their rooms are.
 pub const FACILITIES: &[(i32, i32, &str, &str)] = &[
@@ -96,9 +104,9 @@ pub const FACILITIES: &[(i32, i32, &str, &str)] = &[
     // Down Deep
     (25, 25, "WORKSHOP", "WORKSHOP"),
     (26, 28, "WORKSHOP", "SUPPLY"),
-    (29, 31, "POWER PLANT", "POWER PLANT"),
+    (29, 31, "MINE", "MINE"),
     (32, 33, "PUMPS", "STORES"),
-    (34, 36, "MINE", "MECHANICAL"),
+    (34, 36, "POWER PLANT", "MECHANICAL"),
 ];
 
 /// The facility a tile belongs to (by row and side of the shaft), if any.
@@ -126,6 +134,8 @@ pub enum Tile {
     ItRoom,
     /// Supply's depot. Not buildable; arms the rebels once Supply joins them.
     SupplyRoom,
+    /// The main generator hall. Not buildable.
+    PowerRoom,
     OffMap,
 }
 
@@ -220,6 +230,8 @@ impl Map {
             Tile::ItRoom
         } else if SUPPLY_ROOM.contains(&(c, r)) {
             Tile::SupplyRoom
+        } else if POWER_ROOM.contains(&(c, r)) {
+            Tile::PowerRoom
         } else if r == 0 {
             Tile::Outside
         } else if c == 0 || c == COLS - 1 || (r == 1 && (c == 1 || c == COLS - 2)) {
@@ -369,6 +381,13 @@ mod tests {
         assert_eq!(next, ROWS);
         assert_eq!(facility_at(1, IT_ROOM[0].1), Some("IT"));
         assert_eq!(facility_at(10, SUPPLY_ROOM[0].1), Some("SUPPLY"));
+        // The generator hall sits at the very bottom, beside where the stair starts.
+        assert_eq!(facility_at(1, ROWS - 1), Some("POWER PLANT"));
+        for &(c, r) in &POWER_ROOM {
+            assert_eq!(m.tile(c, r), Tile::PowerRoom);
+            assert!(!m.buildable(c, r));
+        }
+        assert!(waypoints()[0].distance(power_center()) < 2.0, "uprising starts at the plant");
         assert_eq!(section_of_row(0), 0);
         assert_eq!(section_of_row(13), 1);
         assert_eq!(section_of_row(36), 2);

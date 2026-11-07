@@ -632,6 +632,7 @@ impl App {
                     "Supply depot. Supply has joined the uprising: guns and tools for every rebel passing.".into()
                 }
                 Tile::SupplyRoom => "Supply depot. Still loyal... for now.".into(),
+                Tile::PowerRoom => "The main generator. Every uprising starts down here.".into(),
                 Tile::Shaft => format!("Catwalk over the stairwell{where_}. Buildable."),
                 Tile::Stairs => "The spiral stair. The uprising climbs here.".into(),
                 Tile::Rock => "Silo wall. Solid concrete and earth.".into(),
@@ -841,6 +842,7 @@ impl Widget for FieldView<'_> {
                     Tile::Stairs | Tile::Shaft => (' ', Style::new().bg(SHAFT_BG)),
                     Tile::ItRoom => (' ', Style::new().bg(Color::Rgb(16, 24, 40))),
                     Tile::SupplyRoom => (' ', Style::new().bg(Color::Rgb(40, 32, 22))),
+                    Tile::PowerRoom => ('≈', Style::new().fg(Color::Rgb(230, 190, 40)).bg(Color::Rgb(40, 30, 14))),
                     Tile::OffMap => continue,
                 };
                 put(buf, x, y, ch, style);

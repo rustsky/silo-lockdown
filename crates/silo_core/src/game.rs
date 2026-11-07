@@ -94,6 +94,32 @@ pub struct Enemy {
 }
 
 impl Enemy {
+    /// A stand-in rebel for renderers (cut-scenes, portraits). Not part of any game.
+    pub fn for_display(kind: EnemyKind, pos: Vec2) -> Self {
+        let s = kind.base();
+        Self {
+            id: 0,
+            kind,
+            hp: s.hp,
+            max_hp: s.hp,
+            dist: 0.0,
+            pos,
+            speed: s.speed,
+            armor: s.armor,
+            bounty: 0,
+            breach: 0,
+            slow: 0.0,
+            slow_time: 0.0,
+            lane: 0.0,
+            armed: false,
+            tools: false,
+            supplied: false,
+            blocked: true,
+            gun_cooldown: 0.0,
+            last_hit_by: None,
+        }
+    }
+
     pub fn effective_speed(&self) -> f32 {
         self.speed * (1.0 - self.slow)
     }
@@ -602,7 +628,8 @@ impl Game {
         self.wave += 1;
         self.phase = Phase::Wave;
         self.spawn_queue = wave(self.wave).into();
-        self.spawn_timer = self.spawn_queue.front().map_or(0.0, |s| s.delay);
+        // The uprising gathers at the generator hall before anyone climbs.
+        self.spawn_timer = RALLY_TIME + self.spawn_queue.front().map_or(0.0, |s| s.delay);
         self.power_timer = self.rng.range_f32(4.0, 10.0);
         self.emit(Event::WaveStarted { wave: self.wave, lore: wave_lore(self.wave) });
         if self.wave == SUPPLY_JOINS_WAVE {
@@ -1251,7 +1278,9 @@ mod tests {
     fn slows_do_not_stack() {
         let mut g = Game::new(1);
         g.send_wave().unwrap();
-        g.step();
+        while g.enemies.is_empty() {
+            g.step(); // the rally at the generator hall comes first
+        }
         let e = &mut g.enemies[0];
         apply_slow(e, 0.4, 1.5);
         apply_slow(e, 0.4, 1.0);
@@ -1266,7 +1295,9 @@ mod tests {
     fn dead_enemy_ignores_further_hits() {
         let mut g = Game::new(1);
         g.send_wave().unwrap();
-        g.step();
+        while g.enemies.is_empty() {
+            g.step(); // the rally at the generator hall comes first
+        }
         let e = &mut g.enemies[0];
         e.hp = 1.0;
         hit(e, 50.0, true, 99);

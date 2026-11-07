@@ -3,6 +3,7 @@
 use crate::cleaning::Cleaning;
 use crate::fx::{Fx, Kind, PKind};
 use crate::judicial::Judicial;
+use crate::uprising::Uprising;
 use crate::light::Lighting;
 use crate::music::Music;
 use crate::render::{self, *};
@@ -69,6 +70,8 @@ pub struct App {
     selected_enemy: Option<sc::Id>,
     /// Arrests in progress (Sims' agents marching rebels off).
     judicial: Judicial,
+    /// The rally at the generator hall that opens each wave.
+    uprising: Uprising,
     /// The "Sims' agents can arrest rebels" hint was shown this game.
     sims_hinted: bool,
     speed: u32,
@@ -131,6 +134,7 @@ impl App {
             selected_barrier: None,
             selected_enemy: None,
             judicial: Judicial::default(),
+            uprising: Uprising::default(),
             sims_hinted: false,
             speed: 2,
             paused: false,
@@ -321,6 +325,7 @@ impl App {
         self.selected_barrier = None;
         self.selected_enemy = None;
         self.judicial.clear();
+        self.uprising.clear();
         self.sims_hinted = false;
         self.speed = 1;
         self.paused = false;
@@ -456,6 +461,7 @@ impl App {
         set_camera(&world_cam);
         self.cleaning.draw_sensor(self.time);
         self.fx.draw();
+        self.uprising.draw(&self.game, self.time);
         self.judicial.draw(&self.game, self.time);
         self.cleaning.draw(&self.game, self.time);
         self.field_overlays(&ui, world_pointer);
@@ -526,6 +532,9 @@ impl App {
             return;
         }
         let gdt = dt * self.speed as f32;
+        for p in self.uprising.update(gdt) {
+            self.fx.burst(PKind::Spark, p, 7, 150.0, rgb(255, 210, 120));
+        }
         for d in self.judicial.update(gdt) {
             self.cleaning.send(self.game.map(), d, true);
         }
@@ -671,9 +680,16 @@ impl App {
     fn on_event(&mut self, ev: Event) {
         let playing = self.screen == Screen::Playing;
         let airlock = vec2(6.0 * TILE, HUD_H + TILE * 0.5);
+        if let Event::WaveStarted { wave, .. } = ev {
+            self.uprising.start(wave);
+        }
         match ev {
             Event::WaveStarted { wave, lore } if playing => {
                 self.banner = Some((format!("WAVE {wave}"), lore.to_string(), 4.0));
+                // Roll down to the generator hall to watch the uprising start.
+                if self.drag.is_none() {
+                    self.view = SECTION_COUNT - 1;
+                }
             }
             Event::WaveCleared { wave, bonus } if playing => {
                 self.banner = Some((
