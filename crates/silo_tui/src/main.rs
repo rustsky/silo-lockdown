@@ -598,9 +598,9 @@ impl App {
                 format!("   hp {:.0}/{:.0}", t.hp, t.max_hp).into(),
             ]));
             lines.push(Line::from(format!(
-                "dmg {:.0}  range {:.1}  every {:.2}s{}",
+                "dmg {:.0}  reach {:.1}  every {:.2}s{}",
                 s.damage,
-                s.range,
+                t.reach,
                 s.cooldown,
                 if s.pierce { "  pierce" } else { "" }
             )));
@@ -616,7 +616,7 @@ impl App {
                     Line::from(vec![
                         "[u] upgrade ".into(),
                         format!("{cost}").yellow(),
-                        format!(" → dmg {:.0} range {:.1}", n.damage, n.range).dark_gray(),
+                        format!(" → dmg {:.0} reach {:.1}", n.damage, map::reach(t.pos, n.range)).dark_gray(),
                     ])
                 }
                 None => Line::from("max level".dark_gray()),
@@ -626,15 +626,15 @@ impl App {
             let place = map::facility_at(c, r).map_or(String::new(), |f| format!("{f}, "));
             let where_ = format!(" ({place}level ~{}, {})", level_of_row(r), SECTIONS[section_of_row(r)].0);
             let desc = match g.map().tile(c, r) {
-                Tile::Floor => format!("Living quarters{where_}. Buildable."),
+                Tile::Floor => format!("Living quarters{where_}. Deputies, marksmen and jammers."),
                 Tile::ItRoom => "IT's server room. If it falls, the cameras below Up Top go dark.".into(),
                 Tile::SupplyRoom if g.supply_joined() => {
                     "Supply depot. Supply has joined the uprising: guns and tools for every rebel passing.".into()
                 }
                 Tile::SupplyRoom => "Supply depot. Still loyal... for now.".into(),
                 Tile::PowerRoom => "The main generator. Every uprising starts down here.".into(),
-                Tile::Shaft => format!("Catwalk over the stairwell{where_}. Buildable."),
-                Tile::Stairs => "The spiral stair. The uprising climbs here.".into(),
+                Tile::Shaft => format!("Open stairwell{where_}. Nothing stands in mid-air."),
+                Tile::Stairs => "The spiral stair. The uprising climbs here. Deputies and gas launchers.".into(),
                 Tile::Rock => "Silo wall. Solid concrete and earth.".into(),
                 Tile::Airlock => "The airlock. Do not let it open.".into(),
                 Tile::Outside => "The outside. Toxic. Nobody goes there.".into(),
@@ -920,10 +920,14 @@ impl Widget for FieldView<'_> {
         let (cc, cr) = app.cursor;
         let preview = g
             .tower_at(cc, cr)
-            .map(|t| t.stats().range)
-            .or_else(|| app.build.filter(|_| map.buildable(cc, cr)).map(|k| k.stats(1).range));
+            .map(|t| t.reach)
+            .or_else(|| {
+                app.build
+                    .filter(|&k| map.tower_allowed(k, cc, cr))
+                    .map(|k| map::reach(map.tower_pos(cc, cr), k.stats(1).range))
+            });
         if let Some(range) = preview {
-            for cell in cells_in_circle(map::tile_center(cc, cr), range) {
+            for cell in cells_in_circle(map.tower_pos(cc, cr), range) {
                 if let Some(c) = cell_at(buf, area, oy, cell.0, cell.1) {
                     let bg = match c.bg {
                         Color::Rgb(r, gg, b) => Color::Rgb(r.saturating_add(18), gg.saturating_add(30), b.saturating_add(18)),

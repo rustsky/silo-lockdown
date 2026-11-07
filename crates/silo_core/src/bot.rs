@@ -2,7 +2,7 @@
 //! and as an "autoplay" demo in frontends.
 
 use crate::game::{CommandError, Game, Phase};
-use crate::map::{COLS, Map, ROWS, tile_center};
+use crate::map::{COLS, Map, ROWS};
 use crate::stats::TowerKind;
 use std::collections::HashMap;
 
@@ -28,10 +28,11 @@ impl Bot {
             let range = kind.stats(1).range;
             let mut v: Vec<_> = (0..COLS)
                 .flat_map(|c| (0..ROWS).map(move |r| (c, r)))
-                .filter(|&(c, r)| map.buildable(c, r))
+                .filter(|&(c, r)| map.tower_allowed(kind, c, r) && map.in_reach(c, r, range))
                 .map(|(c, r)| {
-                    let p = tile_center(c, r);
-                    (c, r, samples.iter().filter(|s| s.distance(p) <= range).count())
+                    let p = map.tower_pos(c, r);
+                    let reach = crate::map::reach(p, range);
+                    (c, r, samples.iter().filter(|s| s.distance(p) <= reach).count())
                 })
                 .collect();
             v.sort_by(|a, b| b.2.cmp(&a.2).then((a.0, a.1).cmp(&(b.0, b.1))));

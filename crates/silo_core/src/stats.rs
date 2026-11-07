@@ -85,6 +85,15 @@ impl TowerKind {
         }
     }
 
+    /// Where it may be built, for messages.
+    pub fn ground(self) -> &'static str {
+        match self {
+            Self::Deputy => "the levels or the stairs",
+            Self::Jammer | Self::Marksman => "the levels only",
+            Self::Gas => "the stairs only",
+        }
+    }
+
     pub fn cost(self) -> u32 {
         match self {
             Self::Deputy => 50,
@@ -146,7 +155,7 @@ impl TowerKind {
             },
             Self::Marksman => TowerStats {
                 range: 2.6,
-                damage: 48.0,
+                damage: 44.0,
                 cooldown: 2.3,
                 projectile_speed: 0.0,
                 splash: 0.0,

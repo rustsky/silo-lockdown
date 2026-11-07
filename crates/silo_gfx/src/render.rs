@@ -2308,29 +2308,31 @@ pub fn tower_icon(kind: TowerKind, c: Vec2, level: u8, aim: Option<Vec2>, recoil
     }
 }
 
+/// Where a tower is drawn (`tower_icon`'s centre): the tile centre on a level, or raised so
+/// its feet stand on the stair for a tower on the stairs.
+pub fn tower_anchor(map: &sc::Map, t: &sc::Tower) -> Vec2 {
+    let p = px(t.pos);
+    if map.tile(t.col, t.row) == Tile::Stairs {
+        p - vec2(0.0, 24.0)
+    } else {
+        p
+    }
+}
+
+/// Same, for a tower about to be built on tile (c, r).
+pub fn tile_anchor(map: &sc::Map, c: i32, r: i32) -> Vec2 {
+    let p = px(map.tower_pos(c, r));
+    if map.tile(c, r) == Tile::Stairs {
+        p - vec2(0.0, 24.0)
+    } else {
+        p
+    }
+}
+
 fn towers(game: &Game) {
     let map = game.map();
     for t in game.towers() {
-        let c = px(t.pos);
-        if map.tile(t.col, t.row) == Tile::Shaft {
-            // Catwalk platform bolted into the shaft.
-            let (x, y) = (c.x - TILE / 2.0 + 3.0, c.y + 14.0);
-            draw_rectangle(x, y, TILE - 6.0, 6.0, rgb(70, 72, 78));
-            let mut gx = x;
-            while gx < x + TILE - 6.0 {
-                draw_line(gx, y, gx + 4.0, y + 6.0, 1.0, rgb(40, 42, 46));
-                gx += 5.0;
-            }
-            draw_line(x + 6.0, y + 6.0, x + 2.0, y + 22.0, 2.0, rgb(60, 62, 66));
-            draw_line(
-                x + TILE - 12.0,
-                y + 6.0,
-                x + TILE - 8.0,
-                y + 22.0,
-                2.0,
-                rgb(60, 62, 66),
-            );
-        }
+        let c = tower_anchor(map, t);
         let s = t.stats();
         let since = s.cooldown - t.cooldown; // seconds since last shot
         let recoil = (1.0 - since / 0.12).clamp(0.0, 1.0) * (t.cooldown > 0.0) as u8 as f32;
@@ -3671,7 +3673,7 @@ fn world_lights(game: &Game, time: f32, light: &mut Lighting, vis: Vis) {
         light.add_bloom(al + vec2(70.0, -20.0), 18.0, Color::new(1.0, 0.5, 0.1, k));
     }
     for t in game.towers() {
-        let c = px(t.pos);
+        let c = tower_anchor(game.map(), t);
         if !vis.contains(c.y, 80.0) {
             continue;
         }
@@ -3745,14 +3747,31 @@ pub fn vignette() {
     }
 }
 
-pub fn range_circle(c: Vec2, r: f32, ok: bool) {
-    let col = if ok {
-        rgba(120, 230, 140, 255)
-    } else {
-        rgba(255, 90, 80, 255)
-    };
-    draw_circle(c.x, c.y, r, with_alpha(col, 0.10));
-    draw_circle_lines(c.x, c.y, r, 2.0, with_alpha(col, 0.7));
+/// A tower's reach: its circle clipped to the stairwell, the only place rebels ever are.
+/// `c` is the tower in world pixels, `r` its reach in pixels.
+pub fn range_area(c: Vec2, r: f32, ok: bool) {
+    let col = if ok { rgb(120, 230, 140) } else { rgb(255, 90, 80) };
+    let (x0, x1, y0, y1) = sc::map::stairwell();
+    let (x0, x1, y0, y1) = (x0 * TILE, x1 * TILE, HUD_H + y0 * TILE, HUD_H + y1 * TILE);
+    let n = 72;
+    let pts: Vec<Vec2> = (0..n)
+        .map(|i| {
+            let a = i as f32 / n as f32 * std::f32::consts::TAU;
+            let p = c + vec2(a.cos(), a.sin()) * r;
+            vec2(p.x.clamp(x0, x1), p.y.clamp(y0, y1))
+        })
+        .collect();
+    // The clipped disk is convex: fan it from a point inside it.
+    let hub = vec2(c.x.clamp(x0 + 1.0, x1 - 1.0), c.y.clamp(y0 + 1.0, y1 - 1.0));
+    for i in 0..n {
+        let (a, b) = (pts[i], pts[(i + 1) % n]);
+        draw_triangle(hub, a, b, with_alpha(col, 0.10));
+        draw_line(a.x, a.y, b.x, b.y, 2.0, with_alpha(col, 0.7));
+    }
+    // A thin line back to the tower when it stands outside the stairwell.
+    if (hub - c).length() > 2.0 {
+        draw_line(c.x, c.y, hub.x, hub.y, 1.0, with_alpha(col, 0.4));
+    }
 }
 
 /// Whole-silo overview: stair, towers, rebels, and the visible window (`scroll` world px).

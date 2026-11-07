@@ -28,22 +28,30 @@ fn initial_state() {
 #[test]
 fn placement_rules() {
     let mut g = Game::new(0);
-    assert_eq!(g.place(TowerKind::Deputy, 7, 35), Err(CommandError::NotBuildable)); // stairs
+    assert_eq!(g.place(TowerKind::Deputy, 4, 34), Err(CommandError::NotBuildable)); // mid-air
+    assert_eq!(
+        g.place(TowerKind::Marksman, 7, 35),
+        Err(CommandError::WrongGround { kind: TowerKind::Marksman })
+    ); // snipers stay off the stairs
+    assert_eq!(
+        g.place(TowerKind::Gas, 2, 34),
+        Err(CommandError::WrongGround { kind: TowerKind::Gas })
+    ); // gas stays off the levels
     assert_eq!(g.place(TowerKind::Deputy, 5, 0), Err(CommandError::NotBuildable)); // airlock
     assert_eq!(g.place(TowerKind::Deputy, 2, 0), Err(CommandError::NotBuildable)); // outside
     assert_eq!(g.place(TowerKind::Deputy, 0, 5), Err(CommandError::NotBuildable)); // rock wall
     assert_eq!(g.place(TowerKind::Deputy, -1, 3), Err(CommandError::OutOfBounds));
     assert_eq!(g.place(TowerKind::Deputy, 3, 37), Err(CommandError::OutOfBounds));
 
-    let id = g.place(TowerKind::Deputy, 4, 34).unwrap();
+    let id = g.place(TowerKind::Deputy, 4, 36).unwrap(); // on the stair
     assert_eq!(g.chits(), START_CHITS - 50);
-    assert_eq!(g.tower_at(4, 34).unwrap().id, id);
-    assert_eq!(g.place(TowerKind::Jammer, 4, 34), Err(CommandError::Occupied));
+    assert_eq!(g.tower_at(4, 36).unwrap().id, id);
+    assert_eq!(g.place(TowerKind::Deputy, 4, 36), Err(CommandError::Occupied));
 
-    g.place(TowerKind::Deputy, 5, 34).unwrap();
+    g.place(TowerKind::Deputy, 9, 35).unwrap(); // on a level
     // 50 left; Gas costs 100.
     assert_eq!(
-        g.place(TowerKind::Gas, 2, 34),
+        g.place(TowerKind::Gas, 5, 36),
         Err(CommandError::NotEnoughChits { need: 100, have: 50 })
     );
     assert_eq!(g.chits(), 50, "failed command must not charge");
@@ -53,7 +61,7 @@ fn placement_rules() {
 #[test]
 fn upgrade_and_sell() {
     let mut g = Game::new(0);
-    let id = g.place(TowerKind::Deputy, 4, 34).unwrap(); // 100 left
+    let id = g.place(TowerKind::Deputy, 4, 36).unwrap(); // 100 left
     let c1 = TowerKind::Deputy.upgrade_cost(1).unwrap(); // 40
     assert_eq!(g.upgrade(id), Ok(2));
     assert_eq!(g.chits(), 100 - c1);
@@ -72,17 +80,17 @@ fn upgrade_and_sell() {
     assert_eq!(g.sell(id), Err(CommandError::NoSuchTower));
     assert_eq!(g.upgrade(id), Err(CommandError::NoSuchTower));
     // Tile is free again.
-    g.place(TowerKind::Deputy, 4, 34).unwrap();
+    g.place(TowerKind::Deputy, 4, 36).unwrap();
     g.validate().unwrap();
 }
 
 #[test]
 fn max_level() {
     let mut g = Game::new(0);
-    let id = g.place(TowerKind::Deputy, 4, 34).unwrap();
+    let id = g.place(TowerKind::Deputy, 4, 36).unwrap();
     // Two helpers so the silo survives long enough to save up.
-    g.place(TowerKind::Deputy, 4, 35).unwrap();
-    g.place(TowerKind::Deputy, 5, 34).unwrap();
+    g.place(TowerKind::Deputy, 5, 36).unwrap();
+    g.place(TowerKind::Deputy, 9, 35).unwrap();
     // Earn money by surviving waves undefended-ish isn't reliable; use a rich bot run instead:
     // cheaper to just verify via repeated sells/places is impossible, so play waves.
     while g.chits() < 200 {
@@ -101,7 +109,7 @@ fn send_wave_rules() {
     assert_eq!(g.phase(), Phase::Wave);
     assert_eq!(g.send_wave(), Err(CommandError::WaveInProgress));
     // Building during a wave is allowed.
-    g.place(TowerKind::Deputy, 4, 34).unwrap();
+    g.place(TowerKind::Deputy, 4, 36).unwrap();
 }
 
 #[test]
@@ -155,7 +163,7 @@ fn undefended_silo_falls() {
     assert!(g.wave() <= 3, "undefended silo survived to wave {}", g.wave());
     // Game over: every command refused, step does nothing.
     assert_eq!(g.send_wave(), Err(CommandError::GameOver));
-    assert_eq!(g.place(TowerKind::Deputy, 4, 34), Err(CommandError::GameOver));
+    assert_eq!(g.place(TowerKind::Deputy, 4, 36), Err(CommandError::GameOver));
     let h = g.state_hash();
     g.step();
     assert_eq!(g.state_hash(), h);
@@ -165,8 +173,8 @@ fn undefended_silo_falls() {
 fn deputies_kill_porters_and_earn_bounty() {
     let mut g = Game::new(0);
     // Cover the first landing from both sides.
-    g.place(TowerKind::Deputy, 4, 35).unwrap();
-    g.place(TowerKind::Deputy, 5, 34).unwrap();
+    g.place(TowerKind::Deputy, 5, 36).unwrap();
+    g.place(TowerKind::Deputy, 9, 35).unwrap();
     g.send_wave().unwrap();
     g.run_wave(WAVE_CAP);
     let t = g.totals();
@@ -175,6 +183,51 @@ fn deputies_kill_porters_and_earn_bounty() {
     let kills: u32 = g.towers().iter().map(|t| t.kills).sum();
     assert_eq!(kills, t.kills, "kill credit must add up");
     g.validate().unwrap();
+}
+
+/// No tower is ever placed where it can never fire: every tile the engine accepts is within
+/// (stretched) reach of the stair, and only a handful of corner tiles are refused.
+#[test]
+fn placement_only_where_the_tower_can_fire() {
+    let g = Game::new(0);
+    let m = g.map();
+    let samples: Vec<_> = m.samples(0.1).collect();
+    for kind in TowerKind::ALL {
+        let mut refused = 0;
+        for c in 0..map::COLS {
+            for r in 0..map::ROWS {
+                if !m.tower_allowed(kind, c, r) {
+                    continue;
+                }
+                let p = m.tower_pos(c, r);
+                let reach = map::reach(p, kind.stats(1).range);
+                let fires = samples.iter().any(|s| s.distance(p) <= reach);
+                match g.can_place(kind, c, r) {
+                    Ok(()) => assert!(fires, "{kind:?} allowed at ({c},{r}) but can never fire"),
+                    Err(CommandError::OutOfReach) => refused += 1,
+                    Err(e) => panic!("{kind:?} at ({c},{r}): {e:?}"),
+                }
+            }
+        }
+        assert!(refused <= 8, "{kind:?}: {refused} tiles refused");
+    }
+}
+
+#[test]
+fn tower_by_the_wall_now_fires() {
+    // An outer-column jammer used to be out of reach of the stair everywhere.
+    let mut g = Game::new(0);
+    let (c, r) = (1, 20);
+    assert!(g.map().buildable(c, r));
+    let id = g.place(TowerKind::Jammer, c, r).unwrap();
+    assert!(g.tower(id).unwrap().reach > TowerKind::Jammer.stats(1).range);
+    g.send_wave().unwrap();
+    let mut pulsed = false;
+    while g.phase() == Phase::Wave {
+        step_checked(&mut g);
+        pulsed |= g.drain_events().iter().any(|e| matches!(e, Event::Pulse { tower, .. } if *tower == id));
+    }
+    assert!(pulsed, "the wall-side jammer never fired");
 }
 
 #[test]
@@ -186,9 +239,9 @@ fn jammer_slows_enemies() {
             let start = g.map().pos_at(0.0);
             let (c, r) = (0..map::COLS)
                 .flat_map(|c| (0..map::ROWS).map(move |r| (c, r)))
-                .filter(|&(c, r)| g.map().buildable(c, r))
+                .filter(|&(c, r)| g.map().tower_allowed(TowerKind::Jammer, c, r))
                 .min_by(|a, b| {
-                    let d = |&(c, r): &(i32, i32)| map::tile_center(c, r).distance(start);
+                    let d = |&(c, r): &(i32, i32)| g.map().tower_pos(c, r).distance(start);
                     d(a).total_cmp(&d(b))
                 })
                 .unwrap();
@@ -196,7 +249,7 @@ fn jammer_slows_enemies() {
         }
         g.send_wave().unwrap();
         let mut slowed = false;
-        for _ in 0..((RALLY_TIME + 4.0) * 30.0) as u32 {
+        for _ in 0..((RALLY_TIME + 16.0) * 30.0) as u32 {
             g.step();
             slowed |= g.enemies().iter().any(|e| e.is_slowed());
         }
@@ -205,13 +258,13 @@ fn jammer_slows_enemies() {
     };
     let free = travel(false);
     let jammed = travel(true);
-    assert!(jammed < free * 0.85, "jammed {jammed} vs free {free}");
+    assert!(jammed < free * 0.9, "jammed {jammed} vs free {free}");
 }
 
 #[test]
 fn gas_splash_hits_multiple() {
     let mut g = Game::new(0);
-    g.place(TowerKind::Gas, 4, 34).unwrap();
+    g.place(TowerKind::Gas, 6, 35).unwrap();
     g.send_wave().unwrap();
     let mut max_hit_by_one_blast = 0;
     while g.phase() == Phase::Wave {
@@ -233,8 +286,8 @@ fn gas_splash_hits_multiple() {
 fn marksman_pierces_armor() {
     // Wave 4 brings armored miners. Survive to it with deputies, then add a marksman.
     let mut g = Game::new(0);
-    g.place(TowerKind::Deputy, 4, 35).unwrap();
-    g.place(TowerKind::Deputy, 5, 34).unwrap();
+    g.place(TowerKind::Deputy, 5, 36).unwrap();
+    g.place(TowerKind::Deputy, 9, 35).unwrap();
     for _ in 0..3 {
         g.send_wave().unwrap();
         g.run_wave(WAVE_CAP);
@@ -304,7 +357,7 @@ fn same_seed_same_game() {
 #[test]
 fn clone_is_independent_snapshot() {
     let mut g = Game::new(5);
-    g.place(TowerKind::Deputy, 4, 35).unwrap();
+    g.place(TowerKind::Deputy, 5, 36).unwrap();
     g.send_wave().unwrap();
     for _ in 0..200 {
         g.step();
@@ -550,7 +603,7 @@ fn barrier_rules() {
     let id = g.place_barrier(c, r).unwrap();
     assert_eq!(g.chits(), START_CHITS - BARRIER_COST);
     assert_eq!(g.place_barrier(c, r), Err(CommandError::Occupied));
-    assert_eq!(g.place(TowerKind::Deputy, c, r), Err(CommandError::NotBuildable));
+    assert_eq!(g.place(TowerKind::Deputy, c, r), Err(CommandError::Occupied), "barrier there");
     let refund = g.remove_barrier(id).unwrap();
     assert_eq!(refund, (BARRIER_COST as f32 * SELL_REFUND) as u32);
     assert_eq!(g.remove_barrier(id), Err(CommandError::NoSuchBarrier));

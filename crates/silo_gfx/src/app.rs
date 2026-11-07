@@ -72,6 +72,9 @@ pub struct App {
     judicial: Judicial,
     /// The rally at the generator hall that opens each wave.
     uprising: Uprising,
+    /// Static placement rules per tile: [Deputy, Jammer, Gas, Marksman, Barrier][row][col]
+    /// (ground type and reach; occupancy and cost are checked live).
+    spots: Vec<Vec<Vec<bool>>>,
     /// The "Sims' agents can arrest rebels" hint was shown this game.
     sims_hinted: bool,
     speed: u32,
@@ -136,6 +139,7 @@ impl App {
             judicial: Judicial::default(),
             uprising: Uprising::default(),
             sims_hinted: false,
+            spots: Vec::new(),
             speed: 2,
             paused: false,
             acc: 0.0,
@@ -160,6 +164,7 @@ impl App {
             frame: 0,
             quit: false,
         };
+        app.spots = placement_spots(app.game.map());
         if !title {
             app.start();
             app.autopilot = true;
@@ -182,6 +187,26 @@ impl App {
                         for _ in 0..[2, 1, 0, 0][i] {
                             let _ = app.game.upgrade_barrier(id);
                         }
+                    }
+                }
+            }
+            // SILO_SHOT_SELECT=KIND,C,R: build a tower (0=deputy..3=marksman) and select it.
+            if let Ok(v) = std::env::var("SILO_SHOT_SELECT") {
+                let n: Vec<i32> = v.split(',').filter_map(|x| x.parse().ok()).collect();
+                if let [k, c, r] = n[..]
+                    && let Ok(id) = app.game.place(TowerKind::ALL[k as usize % 4], c, r)
+                {
+                    app.selected = Some(id);
+                    app.build = None;
+                }
+            }
+            // SILO_SHOT_TOOL=I (0-3 towers, 4 barrier) [+ SILO_SHOT_TAP=C,R: a tap on that tile].
+            if let Some(i) = std::env::var("SILO_SHOT_TOOL").ok().and_then(|v| v.parse::<usize>().ok()) {
+                app.build = Some(if i < 4 { Tool::Tower(TowerKind::ALL[i]) } else { Tool::Barrier });
+                if let Ok(v) = std::env::var("SILO_SHOT_TAP") {
+                    let n: Vec<i32> = v.split(',').filter_map(|x| x.parse().ok()).collect();
+                    if let [c, r] = n[..] {
+                        app.field_tap(px(sc::map::tile_center(c, r)));
                     }
                 }
             }
@@ -568,7 +593,7 @@ impl App {
                 if t.kind != TowerKind::Gas || !g.is_visible(t.pos) || rand::gen_range(0, 3) != 0 {
                     continue;
                 }
-                let c = px(t.pos);
+                let c = tower_anchor(g.map(), t);
                 let aim = t.aim.map(px);
                 let (tip, dir) = gas_muzzle(c, aim);
                 let from = if rand::gen_range(0, 2) == 0 {
@@ -686,8 +711,10 @@ impl App {
         match ev {
             Event::WaveStarted { wave, lore } if playing => {
                 self.banner = Some((format!("WAVE {wave}"), lore.to_string(), 4.0));
-                // Roll down to the generator hall to watch the uprising start.
-                if self.drag.is_none() {
+                // Roll down to the generator hall to watch the uprising start (screenshot
+                // runs that asked for a section stay there).
+                let pinned = self.shot.is_some() && std::env::var("SILO_SHOT_VIEW").is_ok();
+                if self.drag.is_none() && !pinned {
                     self.view = SECTION_COUNT - 1;
                 }
             }
@@ -764,12 +791,16 @@ impl App {
             }
             Event::Shot {
                 kind: TowerKind::Gas,
+                tower,
                 from,
                 to,
-                ..
             } => {
                 // The tube coughs out a jet of gas as the canister leaves.
-                let (tip, dir) = gas_muzzle(px(from), Some(px(to)));
+                let at = self
+                    .game
+                    .tower(tower)
+                    .map_or(px(from), |t| tower_anchor(self.game.map(), t));
+                let (tip, dir) = gas_muzzle(at, Some(px(to)));
                 for _ in 0..9 {
                     let spread = vec2(-dir.y, dir.x) * rand::gen_range(-0.5, 0.5);
                     let v = (dir + spread) * rand::gen_range(30.0, 110.0);
@@ -980,6 +1011,57 @@ impl App {
             }
             Err(err) => self.report(Err::<(), _>(err)),
         }
+    }
+
+    /// Can `tool` go on tile (c, r) right now (ground, reach and free; cost aside)?
+    fn spot_ok(&self, tool: Tool, c: i32, r: i32) -> bool {
+        let Some(i) = tool_index(tool) else { return false };
+        sc::map::in_bounds(c, r)
+            && self.spots[i][r as usize][c as usize]
+            && self.game.tower_at(c, r).is_none()
+            && self.game.barrier_at(c, r).is_none()
+    }
+
+    /// Why `tool` can't go on tile (c, r): (short label, full hint). None if it can (or the
+    /// only problem is money, which the normal error already explains).
+    fn spot_problem(&self, tool: Tool, c: i32, r: i32) -> Option<(&'static str, String)> {
+        if self.spot_ok(tool, c, r) || !sc::map::in_bounds(c, r) {
+            return None;
+        }
+        if self.game.tower_at(c, r).is_some() || self.game.barrier_at(c, r).is_some() {
+            return Some(("TAKEN", "SOMETHING IS ALREADY THERE".into()));
+        }
+        let map = self.game.map();
+        let tile = map.tile(c, r);
+        let where_ = ground_short(tool);
+        Some(match tool {
+            Tool::Tower(k) => {
+                let name = k.name().to_uppercase();
+                let goes = format!("{name} GOES ON {}", k.ground().to_uppercase());
+                if map.tower_allowed(k, c, r) {
+                    ("OUT OF REACH", "OUT OF REACH: REBELS NEVER PASS WITHIN RANGE HERE".into())
+                } else if tile == sc::Tile::Shaft {
+                    ("NOT IN MID-AIR", format!("NOT IN MID-AIR - {goes}"))
+                } else if map.buildable(c, r) {
+                    (where_, goes)
+                } else {
+                    ("CAN'T BUILD HERE", format!("CAN'T BUILD HERE - {goes}"))
+                }
+            }
+            Tool::Barrier => {
+                if tile == sc::Tile::Stairs {
+                    ("ABOVE SUPPLY ONLY", "BARRIERS ONLY GO ABOVE THE SUPPLY DEPOT".into())
+                } else {
+                    ("STAIRS ONLY", "BARRIERS GO ON THE STAIRS, ABOVE SUPPLY".into())
+                }
+            }
+            Tool::Arrest => return None,
+        })
+    }
+
+    /// A tap that tried to build in the wrong place: say why and where it does go.
+    fn wrong_spot(&mut self, hint: String) {
+        self.fx.toast(hint);
     }
 
     /// The living, visible rebel whose body is under world pixel `p`.
@@ -1312,11 +1394,19 @@ impl App {
             self.selected_barrier = None;
             self.build = None;
         } else if let Some(Tool::Tower(k)) = self.build {
-            let res = self.game.place(k, c, r);
-            self.report(res);
+            if let Some((_, hint)) = self.spot_problem(Tool::Tower(k), c, r) {
+                self.wrong_spot(hint);
+            } else {
+                let res = self.game.place(k, c, r);
+                self.report(res);
+            }
         } else if self.build == Some(Tool::Barrier) {
-            let res = self.game.place_barrier(c, r);
-            self.report(res);
+            if let Some((_, hint)) = self.spot_problem(Tool::Barrier, c, r) {
+                self.wrong_spot(hint);
+            } else {
+                let res = self.game.place_barrier(c, r);
+                self.report(res);
+            }
         } else {
             self.selected = None;
             self.selected_barrier = None;
@@ -1330,8 +1420,8 @@ impl App {
             return;
         }
         if let Some(t) = self.selected.and_then(|id| self.game.tower(id)) {
-            let c = px(t.pos);
-            range_circle(c, t.stats().range * TILE, true);
+            range_area(px(t.pos), t.reach * TILE, true);
+            let c = tower_anchor(self.game.map(), t);
             draw_circle_lines(c.x, c.y, 25.0, 2.5, rgb(255, 255, 255));
         }
         if let Some(b) = self.selected_barrier.and_then(|id| self.game.barrier(id)) {
@@ -1364,6 +1454,21 @@ impl App {
         let over_nav = [up, map, down].iter().any(|r| r.contains(ui.pointer));
         let hovering =
             ui.pointer.y >= HUD_H && ui.pointer.y < PANEL_Y && !over_nav && self.drag.is_none();
+        if let Some(tool) = self.build.filter(|t| *t != Tool::Arrest) {
+            // Hovering a wrong tile (desktop): a red cross and why.
+            if let Some((c, r)) = tile_at(world_pointer).filter(|_| hovering)
+                && let Some((short, _)) = self.spot_problem(tool, c, r)
+            {
+                let (x, y) = (c as f32 * TILE, HUD_H + r as f32 * TILE);
+                let red = rgba(255, 90, 80, 210);
+                draw_line(x + 12.0, y + 10.0, x + TILE - 12.0, y + TILE - 14.0, 2.5, red);
+                draw_line(x + TILE - 12.0, y + 10.0, x + 12.0, y + TILE - 14.0, 2.5, red);
+                let w = measure(short, 12.0) + 10.0;
+                let lx = (x + TILE / 2.0 - w / 2.0).clamp(4.0, W - w - 4.0);
+                draw_rectangle(lx, y + TILE - 14.0, w, 16.0, rgba(40, 8, 8, 220));
+                text(short, lx + 5.0, y + TILE - 2.0, 12.0, rgb(255, 170, 160));
+            }
+        }
         if self.build == Some(Tool::Barrier) {
             // Show where barriers may go: the stair above the Supply depot.
             let y = HUD_H + sc::map::SUPPLY_ROOM[0].1 as f32 * TILE;
@@ -1425,10 +1530,12 @@ impl App {
         {
             {
                 let ok = self.game.can_place(k, c, r).is_ok();
-                let center = px(sc::map::tile_center(c, r));
-                if self.game.map().buildable(c, r) {
-                    range_circle(center, k.stats(1).range * TILE, ok);
-                    tower_icon(k, center, 1, None, 0.0, 0.55);
+                let map = self.game.map();
+                if map.tower_allowed(k, c, r) {
+                    let pos = map.tower_pos(c, r);
+                    let reach = sc::map::reach(pos, k.stats(1).range);
+                    range_area(px(pos), reach * TILE, ok);
+                    tower_icon(k, tile_anchor(map, c, r), 1, None, 0.0, 0.55);
                 } else {
                     draw_rectangle_lines(
                         c as f32 * TILE + 2.0,
@@ -1660,8 +1767,8 @@ impl App {
                 rgb(200, 200, 200),
             );
             let mut lines = vec![format!(
-                "DMG {:.0}   RANGE {:.1}   EVERY {:.2}s",
-                s.damage, s.range, s.cooldown
+                "DMG {:.0}   REACH {:.1}   EVERY {:.2}s",
+                s.damage, t.reach, s.cooldown
             )];
             if s.slow > 0.0 {
                 lines.push(format!(
@@ -1884,6 +1991,13 @@ impl App {
                 22.0,
                 cost_col,
             );
+            text_centered(
+                ground_short(Tool::Tower(k)),
+                r.x + r.w / 2.0,
+                r.y + 142.0,
+                10.0,
+                rgb(140, 140, 146),
+            );
             text(
                 &format!("{}", i + 1),
                 r.x + 8.0,
@@ -1938,7 +2052,7 @@ impl App {
             );
             text("5", r.x + 8.0, r.y + 20.0, 14.0, rgb(110, 110, 116));
             text_centered(
-                "ABOVE SUPPLY",
+                ground_short(Tool::Barrier),
                 r.x + r.w / 2.0,
                 r.y + 142.0,
                 10.0,
@@ -2140,4 +2254,38 @@ fn gas_color() -> Color {
 fn gas_color_faint() -> Color {
     let k = rand::gen_range(0.9, 1.1);
     Color::new(0.55 * k, 0.8 * k, 0.45 * k, 0.45)
+}
+
+/// Which tiles each tool may ever use (by ground type and reach), computed once: index
+/// [Deputy, Jammer, Gas, Marksman, Barrier][row][col].
+fn placement_spots(map: &sc::Map) -> Vec<Vec<Vec<bool>>> {
+    use sc::map::{COLS, ROWS};
+    let grid = |f: &dyn Fn(i32, i32) -> bool| -> Vec<Vec<bool>> {
+        (0..ROWS).map(|r| (0..COLS).map(|c| f(c, r)).collect()).collect()
+    };
+    let mut v: Vec<Vec<Vec<bool>>> = TowerKind::ALL
+        .iter()
+        .map(|&k| grid(&|c, r| map.tower_allowed(k, c, r) && map.in_reach(c, r, k.stats(1).range)))
+        .collect();
+    v.push(grid(&|c, r| map.barrier_allowed(c, r)));
+    v
+}
+
+fn tool_index(tool: Tool) -> Option<usize> {
+    match tool {
+        Tool::Tower(k) => TowerKind::ALL.iter().position(|&x| x == k),
+        Tool::Barrier => Some(4),
+        Tool::Arrest => None,
+    }
+}
+
+/// Short "where it goes" label for build cards and hover hints.
+fn ground_short(tool: Tool) -> &'static str {
+    match tool {
+        Tool::Tower(TowerKind::Deputy) => "LEVELS + STAIRS",
+        Tool::Tower(TowerKind::Gas) => "STAIRS ONLY",
+        Tool::Tower(_) => "LEVELS ONLY",
+        Tool::Barrier => "STAIRS ABOVE SUPPLY",
+        Tool::Arrest => "",
+    }
 }

@@ -3,7 +3,7 @@
 //! the event stream.
 
 use crate::map::{
-    IT_REACH, Map, ROWS, SECTIONS, SUPPLY_REACH, in_bounds, it_center, supply_center, tile_center,
+    IT_REACH, Map, ROWS, SECTIONS, SUPPLY_REACH, in_bounds, it_center, supply_center,
 };
 use crate::math::Vec2;
 use crate::rng::Rng;
@@ -47,6 +47,9 @@ pub struct Tower {
     /// Armed rebels shoot towers; at 0 the tower is destroyed. Repaired between waves.
     pub hp: f32,
     pub max_hp: f32,
+    /// How far it actually hits from where it stands: its range, pushed out into the
+    /// stairwell where walls and floors would waste it (see `map::reach`).
+    pub reach: f32,
 }
 
 impl Tower {
@@ -207,6 +210,10 @@ pub enum CommandError {
     /// Barriers only go on the stair above the Supply depot.
     BarrierNotAllowed,
     NoSuchBarrier,
+    /// This kind of tower doesn't go on this kind of ground (see `Map::tower_allowed`).
+    WrongGround { kind: TowerKind },
+    /// Even stretched across the stairwell, its range never touches the stair from there.
+    OutOfReach,
     /// The barrier is a wreck until the wave ends.
     BarrierBroken,
     NoSuchEnemy,
@@ -227,6 +234,8 @@ impl std::fmt::Display for CommandError {
             Self::WaveInProgress => write!(f, "wave already in progress"),
             Self::BarrierNotAllowed => write!(f, "barriers go on the stair above Supply"),
             Self::NoSuchBarrier => write!(f, "no barrier there"),
+            Self::WrongGround { kind } => write!(f, "{} goes on {}", kind.name(), kind.ground()),
+            Self::OutOfReach => write!(f, "out of reach: rebels never pass within range here"),
             Self::BarrierBroken => write!(f, "that barrier is wrecked; IT rebuilds it after the wave"),
             Self::NoSuchEnemy => write!(f, "no rebel there"),
             Self::NotVisible => write!(f, "the cameras can't see them"),
@@ -404,7 +413,7 @@ impl Game {
         if !self.map.barrier_allowed(col, row) {
             return Err(CommandError::BarrierNotAllowed);
         }
-        if self.barrier_at(col, row).is_some() {
+        if self.barrier_at(col, row).is_some() || self.tower_at(col, row).is_some() {
             return Err(CommandError::Occupied);
         }
         self.afford(BARRIER_COST)
@@ -459,11 +468,18 @@ impl Game {
         if !in_bounds(col, row) {
             return Err(CommandError::OutOfBounds);
         }
-        if !self.map.buildable(col, row) {
-            return Err(CommandError::NotBuildable);
+        if !self.map.tower_allowed(kind, col, row) {
+            return Err(if self.map.buildable(col, row) {
+                CommandError::WrongGround { kind }
+            } else {
+                CommandError::NotBuildable
+            });
         }
-        if self.tower_at(col, row).is_some() {
+        if self.tower_at(col, row).is_some() || self.barrier_at(col, row).is_some() {
             return Err(CommandError::Occupied);
+        }
+        if !self.map.in_reach(col, row, kind.stats(1).range) {
+            return Err(CommandError::OutOfReach);
         }
         self.afford(kind.cost())
     }
@@ -498,7 +514,7 @@ impl Game {
             kind,
             col,
             row,
-            pos: tile_center(col, row),
+            pos: self.map.tower_pos(col, row),
             level: 1,
             invested: cost,
             cooldown: 0.0,
@@ -506,6 +522,7 @@ impl Game {
             kills: 0,
             hp: kind.max_hp(1),
             max_hp: kind.max_hp(1),
+            reach: crate::map::reach(self.map.tower_pos(col, row), kind.stats(1).range),
         });
         self.emit(Event::TowerPlaced { id, kind, col, row });
         Ok(id)
@@ -524,6 +541,7 @@ impl Game {
         let new_max = t.kind.max_hp(t.level);
         t.hp += new_max - t.max_hp;
         t.max_hp = new_max;
+        t.reach = crate::map::reach(t.pos, t.stats().range);
         let level = t.level;
         self.emit(Event::TowerUpgraded { id, level });
         Ok(level)
@@ -772,13 +790,13 @@ impl Game {
                 continue;
             }
             let st = t.stats();
-            let (tid, tkind, tpos) = (t.id, t.kind, t.pos);
+            let (tid, tkind, tpos, reach) = (t.id, t.kind, t.pos, t.reach);
 
             // Target the living enemy furthest along the path within range.
             let target = self
                 .enemies
                 .iter()
-                .filter(|e| e.hp > 0.0 && e.pos.distance(tpos) <= st.range)
+                .filter(|e| e.hp > 0.0 && e.pos.distance(tpos) <= reach)
                 .max_by(|a, b| a.dist.total_cmp(&b.dist))
                 .map(|e| (e.id, e.pos, e.dist, e.effective_speed()));
             let Some((eid, epos, edist, espeed)) = target else { continue };
@@ -830,12 +848,12 @@ impl Game {
                 }
                 TowerKind::Jammer => {
                     for e in self.enemies.iter_mut().filter(|e| e.hp > 0.0) {
-                        if e.pos.distance(tpos) <= st.range {
+                        if e.pos.distance(tpos) <= reach {
                             hit(e, st.damage, st.pierce, tid);
                             apply_slow(e, st.slow, st.slow_time);
                         }
                     }
-                    self.emit(Event::Pulse { tower: tid, pos: tpos, radius: st.range });
+                    self.emit(Event::Pulse { tower: tid, pos: tpos, radius: reach });
                 }
             }
         }
@@ -1180,7 +1198,7 @@ impl Game {
             return Err(format!("chit ledger mismatch: have {} expected {expected}", self.chits));
         }
         for (i, tw) in self.towers.iter().enumerate() {
-            if !self.map.buildable(tw.col, tw.row) {
+            if !self.map.tower_allowed(tw.kind, tw.col, tw.row) {
                 return Err(format!("tower {} on unbuildable tile", tw.id));
             }
             if self.towers[i + 1..].iter().any(|o| (o.col, o.row) == (tw.col, tw.row)) {
@@ -1188,6 +1206,10 @@ impl Game {
             }
             if !(1..=MAX_TOWER_LEVEL).contains(&tw.level) || !tw.cooldown.is_finite() || tw.cooldown < 0.0 {
                 return Err(format!("tower {} bad state {:?}", tw.id, tw));
+            }
+            let range = tw.stats().range;
+            if !(tw.reach >= range && tw.reach <= 3.0 * range + 1e-3) {
+                return Err(format!("tower {} reach {} vs range {range}", tw.id, tw.reach));
             }
             if !(tw.hp > 0.0 && tw.hp <= tw.max_hp + 1e-3) || tw.max_hp != tw.kind.max_hp(tw.level) {
                 return Err(format!("tower {} hp {} / {}", tw.id, tw.hp, tw.max_hp));

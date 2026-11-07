@@ -5,7 +5,8 @@
 //! surface, rows 1..ROWS are underground. Columns 0 and COLS-1 are the silo's rock walls.
 
 use crate::math::{Vec2, vec2};
-use std::collections::HashSet;
+use crate::stats::TowerKind;
+use std::collections::{HashMap, HashSet};
 
 pub const COLS: i32 = 12;
 /// Surface row plus 36 underground rows: three sections of 12 rows (48 silo levels) each.
@@ -54,6 +55,59 @@ pub fn waypoints() -> Vec<Vec2> {
     v.push(vec2(PILLAR_X, 1.6));
     v.push(vec2(PILLAR_X, 0.5));
     v
+}
+
+/// How far a tower with nominal `range` actually reaches from `pos`.
+///
+/// Rebels are only ever in the stairwell: between `SHAFT_LEFT` and `SHAFT_RIGHT`, from the top
+/// of the stair down to where it starts. Part of a tower's circle that falls on floors, the silo
+/// wall, the surface or bedrock is wasted, so it is pushed out into the stairwell instead: the
+/// reach is the radius at which the circle's area inside the stairwell equals the area of the
+/// nominal circle (pi * range^2). A tower in the middle of the shaft keeps its range; one on a
+/// floor by the wall reaches further across the stairwell. Capped at 3x.
+pub fn reach(pos: Vec2, range: f32) -> f32 {
+    let target = std::f32::consts::PI * range * range;
+    let area = |r: f32| stairwell_area(pos, r);
+    if area(range) >= target * 0.999 {
+        return range;
+    }
+    let (mut lo, mut hi) = (range, 3.0 * range);
+    if area(hi) < target {
+        return hi;
+    }
+    for _ in 0..30 {
+        let mid = 0.5 * (lo + hi);
+        if area(mid) < target { lo = mid } else { hi = mid }
+    }
+    hi
+}
+
+/// The stairwell rectangle rebels move in: (x0, x1, y0, y1).
+pub fn stairwell() -> (f32, f32, f32, f32) {
+    let w = waypoints();
+    let y0 = w.iter().map(|p| p.y).fold(f32::MAX, f32::min);
+    let y1 = w.iter().map(|p| p.y).fold(f32::MIN, f32::max);
+    (SHAFT_LEFT, SHAFT_RIGHT, y0, y1)
+}
+
+/// Area of the circle of radius `r` around `c` that lies inside the stairwell rectangle.
+pub fn stairwell_area(c: Vec2, r: f32) -> f32 {
+    let (x0, x1, y0, y1) = stairwell();
+    let (a, b) = ((c.x - r).max(x0), (c.x + r).min(x1));
+    if a >= b {
+        return 0.0;
+    }
+    // Midpoint rule over x: the chord at each x, clipped to [y0, y1].
+    let n = 160;
+    let dx = (b - a) / n as f32;
+    let mut sum = 0.0;
+    for i in 0..n {
+        let x = a + (i as f32 + 0.5) * dx;
+        let h = (r * r - (x - c.x) * (x - c.x)).max(0.0).sqrt();
+        let len = ((c.y + h).min(y1) - (c.y - h).max(y0)).max(0.0);
+        sum += len * dx;
+    }
+    sum
 }
 
 /// The airlock door spans these two surface tiles.
@@ -145,6 +199,9 @@ pub struct Map {
     cum: Vec<f32>,
     total: f32,
     stairs: HashSet<(i32, i32)>,
+    /// For each stair tile: where along the path its stretch of stair stands (the middle of
+    /// the longest run of path crossing it).
+    stair_spots: HashMap<(i32, i32), f32>,
 }
 
 pub fn tile_center(c: i32, r: i32) -> Vec2 {
@@ -170,17 +227,29 @@ impl Map {
             cum.push(last + w[0].distance(w[1]));
         }
         let total = *cum.last().unwrap();
-        let mut map = Self { points, cum, total, stairs: HashSet::new() };
+        let mut map = Self { points, cum, total, stairs: HashSet::new(), stair_spots: HashMap::new() };
 
-        // Every tile the stair passes through is blocked.
+        // Every tile the stair passes through is stair; note the runs of path through each.
+        let step = 0.02;
+        let mut runs: HashMap<(i32, i32), Vec<(f32, f32)>> = HashMap::new();
         let mut d = 0.0;
         while d <= total {
             let p = map.pos_at(d);
             let t = (p.x.floor() as i32, p.y.floor() as i32);
             if in_bounds(t.0, t.1) {
                 map.stairs.insert(t);
+                let v = runs.entry(t).or_default();
+                match v.last_mut() {
+                    Some(run) if d - run.1 <= step * 1.5 => run.1 = d,
+                    _ => v.push((d, d)),
+                }
             }
-            d += 0.02;
+            d += step;
+        }
+        for (t, v) in runs {
+            if let Some((a, b)) = v.into_iter().max_by(|a, b| (a.1 - a.0).total_cmp(&(b.1 - b.0))) {
+                map.stair_spots.insert(t, (a + b) / 2.0);
+            }
         }
         map
     }
@@ -215,6 +284,26 @@ impl Map {
         self.points.windows(2).map(|w| (w[0], w[1], w[1].x > w[0].x))
     }
 
+    /// Shortest distance from `p` to the rebels' path.
+    pub fn distance_to_path(&self, p: Vec2) -> f32 {
+        self.points
+            .windows(2)
+            .map(|w| {
+                let (a, b) = (w[0], w[1]);
+                let ab = b - a;
+                let dot = |u: Vec2, v: Vec2| u.x * v.x + u.y * v.y;
+                let t = (dot(p - a, ab) / dot(ab, ab)).clamp(0.0, 1.0);
+                p.distance(a + ab * t)
+            })
+            .fold(f32::MAX, f32::min)
+    }
+
+    /// Can a tower with nominal `range` standing on tile (c, r) ever hit anyone on the stair?
+    pub fn in_reach(&self, c: i32, r: i32, range: f32) -> bool {
+        let p = self.tower_pos(c, r);
+        self.distance_to_path(p) <= reach(p, range)
+    }
+
     /// Silo level (144 at the bottom .. 1 at the airlock) for a distance along the path.
     pub fn level_at(&self, d: f32) -> u32 {
         let t = (d / self.total).clamp(0.0, 1.0);
@@ -246,8 +335,29 @@ impl Map {
         }
     }
 
+    /// Can a tower of this kind stand on tile (c, r)? Deputies, marksmen and jammers go on the
+    /// levels (floors); deputies and gas launchers go on the stair itself. Nothing is built in
+    /// mid-air over the stairwell. (Reach is checked separately: see `in_reach`.)
+    pub fn tower_allowed(&self, kind: TowerKind, c: i32, r: i32) -> bool {
+        match self.tile(c, r) {
+            Tile::Floor => matches!(kind, TowerKind::Deputy | TowerKind::Marksman | TowerKind::Jammer),
+            // Not on the ladder up to the airlock.
+            Tile::Stairs => r >= 3 && matches!(kind, TowerKind::Deputy | TowerKind::Gas),
+            _ => false,
+        }
+    }
+
+    /// Could any tower stand on tile (c, r)?
     pub fn buildable(&self, c: i32, r: i32) -> bool {
-        matches!(self.tile(c, r), Tile::Floor | Tile::Shaft)
+        TowerKind::ALL.iter().any(|&k| self.tower_allowed(k, c, r))
+    }
+
+    /// Where a tower on tile (c, r) stands: the tile centre on a floor, or on the stair itself.
+    pub fn tower_pos(&self, c: i32, r: i32) -> Vec2 {
+        match self.stair_spots.get(&(c, r)) {
+            Some(&d) if self.tile(c, r) == Tile::Stairs => self.pos_at(d),
+            _ => tile_center(c, r),
+        }
     }
 
     /// Barriers go on the stair, only above the Supply depot.
@@ -261,20 +371,7 @@ impl Map {
         if !self.barrier_allowed(c, r) {
             return None;
         }
-        let step = 0.02;
-        let mut runs: Vec<(f32, f32)> = vec![];
-        let mut d = 0.0;
-        while d <= self.total {
-            let p = self.pos_at(d);
-            if (p.x.floor() as i32, p.y.floor() as i32) == (c, r) {
-                match runs.last_mut() {
-                    Some(run) if d - run.1 <= step * 1.5 => run.1 = d,
-                    _ => runs.push((d, d)),
-                }
-            }
-            d += step;
-        }
-        runs.into_iter().max_by(|a, b| (a.1 - a.0).total_cmp(&(b.1 - b.0))).map(|(a, b)| (a + b) / 2.0)
+        self.stair_spots.get(&(c, r)).copied()
     }
 
     /// Evenly spaced samples along the path (useful for AI/bot coverage scoring).
@@ -400,6 +497,22 @@ mod tests {
     }
 
     #[test]
+    fn reach_keeps_area_and_pushes_range_into_the_stairwell() {
+        let pi = std::f32::consts::PI;
+        // Mid-shaft: the whole circle is already in the stairwell.
+        assert_eq!(reach(vec2(6.0, 20.0), 1.9), 1.9);
+        // By the wall: longer reach, same area inside the stairwell.
+        for r in [1.5, 1.7, 1.9, 2.6] {
+            let p = vec2(1.5, 20.5);
+            let rr = reach(p, r);
+            assert!(rr > r, "no boost at the wall for {r}");
+            assert!((stairwell_area(p, rr) - pi * r * r).abs() < 0.05, "area not kept for {r}");
+        }
+        // Further from the stairwell -> further reach.
+        assert!(reach(vec2(1.5, 20.0), 1.9) > reach(vec2(2.5, 20.0), 1.9));
+    }
+
+    #[test]
     fn stair_climbs_monotonically() {
         let m = Map::new();
         for (a, b, _) in m.segments() {
@@ -419,12 +532,27 @@ mod tests {
         assert_eq!(m.tile(1, 5), Tile::Floor);
         assert_eq!(m.tile(10, 5), Tile::Floor);
         assert_eq!(m.tile(-1, 5), Tile::OffMap);
-        // Gaps between spiral passes in the middle of the shaft are catwalks.
+        // Gaps between spiral passes are open air: nothing is built there.
         assert_eq!(m.tile(6, 9), Tile::Shaft);
-        assert!(m.buildable(6, 9));
+        assert!(!m.buildable(6, 9));
         for (c, r) in all_tiles() {
             let t = m.tile(c, r);
-            assert_eq!(m.buildable(c, r), matches!(t, Tile::Floor | Tile::Shaft));
+            assert_eq!(m.buildable(c, r), t == Tile::Floor || (t == Tile::Stairs && r >= 3));
+            for k in TowerKind::ALL {
+                let ok = m.tower_allowed(k, c, r);
+                match t {
+                    Tile::Floor => assert_eq!(ok, k != TowerKind::Gas, "{k:?} on a floor"),
+                    Tile::Stairs if r >= 3 => {
+                        assert_eq!(ok, matches!(k, TowerKind::Deputy | TowerKind::Gas), "{k:?} on stairs")
+                    }
+                    _ => assert!(!ok, "{k:?} on {t:?}"),
+                }
+            }
+            if t == Tile::Stairs && r >= 3 {
+                // Stair towers stand on the stair, inside their tile.
+                let p = m.tower_pos(c, r);
+                assert_eq!((p.x.floor() as i32, p.y.floor() as i32), (c, r));
+            }
             if t == Tile::Stairs {
                 assert!((3..=8).contains(&c), "stairs outside shaft at ({c},{r})");
             }
