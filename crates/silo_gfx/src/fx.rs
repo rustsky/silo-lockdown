@@ -26,6 +26,8 @@ pub enum PKind {
     Spark,
     Ember,
     Debris,
+    /// Soft billowing gas: grows, drifts up a little and thins out.
+    Gas,
 }
 
 pub struct Particle {
@@ -36,6 +38,8 @@ pub struct Particle {
     kind: PKind,
     color: Color,
     spin: f32,
+    /// Starting radius for gas puffs (pixels).
+    size: f32,
 }
 
 #[derive(Default)]
@@ -69,6 +73,24 @@ impl Fx {
             kind,
             color,
             spin: macroquad::rand::gen_range(-12.0, 12.0),
+            size: 1.0,
+        });
+    }
+
+    /// One puff of gas of starting radius `size`.
+    pub fn gas(&mut self, pos: Vec2, vel: Vec2, life: f32, size: f32, color: Color) {
+        if self.parts.len() > 1500 {
+            return;
+        }
+        self.parts.push(Particle {
+            pos,
+            vel,
+            t: 0.0,
+            life,
+            kind: PKind::Gas,
+            color,
+            spin: macroquad::rand::gen_range(0.0, std::f32::consts::TAU),
+            size,
         });
     }
 
@@ -102,9 +124,15 @@ impl Fx {
                 PKind::Casing | PKind::Debris => 600.0,
                 PKind::Spark => 350.0,
                 PKind::Ember => -40.0,
+                PKind::Gas => -18.0,
             };
             p.vel.y += gravity * dt;
-            p.vel *= 1.0 - (if p.kind == PKind::Ember { 1.5 } else { 0.6 }) * dt;
+            let drag = match p.kind {
+                PKind::Ember => 1.5,
+                PKind::Gas => 2.2,
+                _ => 0.6,
+            };
+            p.vel *= (1.0 - drag * dt).max(0.0);
             p.pos += p.vel * dt;
         }
         self.parts.retain(|p| p.t < p.life);
@@ -119,6 +147,27 @@ impl Fx {
     }
 
     pub fn draw(&self) {
+        // Gas first, so sparks and debris read on top of it.
+        for p in self.parts.iter().filter(|p| p.kind == PKind::Gas) {
+            let k = p.t / p.life;
+            // Fade in quickly, then thin out as it spreads.
+            let a = (k * 8.0).min(1.0) * (1.0 - k) * (1.0 - k);
+            let r = p.size * (1.0 + 1.4 * k);
+            let wob = vec2(p.spin.cos(), p.spin.sin()) * r * 0.25;
+            let c = p.color;
+            draw_circle(p.pos.x, p.pos.y, r, Color::new(c.r, c.g, c.b, c.a * a * 0.45));
+            draw_circle(
+                p.pos.x + wob.x,
+                p.pos.y + wob.y,
+                r * 0.62,
+                Color::new(
+                    (c.r * 1.25).min(1.0),
+                    (c.g * 1.15).min(1.0),
+                    (c.b * 1.2).min(1.0),
+                    c.a * a * 0.38,
+                ),
+            );
+        }
         for p in &self.parts {
             let fade = 1.0 - p.t / p.life;
             match p.kind {
@@ -153,6 +202,7 @@ impl Fx {
                     3.0,
                     with_alpha(p.color, fade),
                 ),
+                PKind::Gas => {}
             }
         }
         for e in &self.list {

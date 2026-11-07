@@ -2,6 +2,7 @@
 //! All game rules live in `silo_core`; this crate only renders and handles input.
 
 mod app;
+mod cleaning;
 mod fx;
 mod light;
 mod music;

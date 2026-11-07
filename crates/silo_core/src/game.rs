@@ -191,7 +191,8 @@ pub enum Event {
     WaveStarted { wave: u32, lore: &'static str },
     WaveCleared { wave: u32, bonus: u32 },
     EnemySpawned { id: Id, kind: EnemyKind },
-    EnemyKilled { id: Id, kind: EnemyKind, pos: Vec2, bounty: u32 },
+    /// `dist` is how far along the path the rebel got.
+    EnemyKilled { id: Id, kind: EnemyKind, pos: Vec2, dist: f32, bounty: u32 },
     Breach { id: Id, kind: EnemyKind, seals_lost: u32 },
     TowerPlaced { id: Id, kind: TowerKind, col: i32, row: i32 },
     TowerUpgraded { id: Id, level: u8 },
@@ -891,7 +892,13 @@ impl Game {
             if let Some(t) = e.last_hit_by.and_then(|id| self.towers.iter_mut().find(|t| t.id == id)) {
                 t.kills += 1;
             }
-            self.emit(Event::EnemyKilled { id: e.id, kind: e.kind, pos: e.pos, bounty: e.bounty });
+            self.emit(Event::EnemyKilled {
+                id: e.id,
+                kind: e.kind,
+                pos: e.pos,
+                dist: e.dist,
+                bounty: e.bounty,
+            });
         }
     }
 

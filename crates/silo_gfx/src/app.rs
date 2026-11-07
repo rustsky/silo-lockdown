@@ -1,5 +1,6 @@
 //! Game loop glue: input, fixed-step simulation, events -> effects, HUD and command panel.
 
+use crate::cleaning::Cleaning;
 use crate::fx::{Fx, Kind, PKind};
 use crate::light::Lighting;
 use crate::music::Music;
@@ -66,6 +67,10 @@ pub struct App {
     acc: f32,
     time: f32,
     fx: Fx,
+    /// Downed leaders being sent out to clean the sensor.
+    cleaning: Cleaning,
+    /// Accumulator for the gas launchers' idle venting.
+    vent_acc: f32,
     /// Section the view is rolling to (0 = Up Top .. 2 = Down Deep).
     view: usize,
     /// Current vertical scroll of the field in world pixels (animates toward `view`).
@@ -120,6 +125,8 @@ impl App {
             acc: 0.0,
             time: 0.0,
             fx: Fx::default(),
+            cleaning: Cleaning::default(),
+            vent_acc: 0.0,
             view: 0,
             scroll: 0.0,
             view_label: 0.0,
@@ -156,6 +163,14 @@ impl App {
                 for (c, r) in [(4, 16), (7, 18), (4, 20), (7, 22)] {
                     let _ = app.game.place_barrier(c, r);
                 }
+            }
+            // SILO_SHOT_CLEAN=D: send a cleaner from D tiles short of the airlock.
+            if let Some(d) = std::env::var("SILO_SHOT_CLEAN")
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok())
+            {
+                let len = app.game.map().length();
+                app.cleaning.send(app.game.map(), (len - d).max(0.0));
             }
             let view = std::env::var("SILO_SHOT_VIEW")
                 .ok()
@@ -286,6 +301,7 @@ impl App {
         self.paused = false;
         self.acc = 0.0;
         self.fx.clear();
+        self.cleaning.clear();
         // Start where the uprising starts.
         self.view = SECTION_COUNT - 1;
         self.drag = None;
@@ -337,6 +353,7 @@ impl App {
         }
         self.simulate(dt);
         self.fx.update(dt);
+        self.update_gas_and_cleaning(dt);
         self.update_scroll(dt);
         self.update_music(dt);
         // The world camera is the screen camera rolled down by the current scroll.
@@ -389,7 +406,9 @@ impl App {
             Color::new(0.3, 0.31, 0.38, 1.0),
         );
         set_camera(&world_cam);
+        self.cleaning.draw_sensor(self.time);
         self.fx.draw();
+        self.cleaning.draw(&self.game, self.time);
         self.field_overlays(&ui, world_pointer);
         render::darkness(&self.game, self.time);
         set_camera(&cam);
@@ -450,6 +469,59 @@ impl App {
     }
 
     // ------------------------------------------------------------ simulation
+
+    /// Gas trails behind canisters in flight, gas launchers venting while idle, and the
+    /// cleaners' walk (both run on game time, so they freeze when paused).
+    fn update_gas_and_cleaning(&mut self, dt: f32) {
+        if self.paused {
+            return;
+        }
+        let gdt = dt * self.speed as f32;
+        for w in self.cleaning.update(self.game.map(), gdt) {
+            self.fx.add(
+                w - vec2(0.0, 6.0),
+                1.4,
+                Kind::Text {
+                    text: "LENS CLEAN".into(),
+                    color: rgb(200, 230, 255),
+                },
+            );
+        }
+        let g = &self.game;
+        let trail = (gdt * 50.0).min(4.0);
+        for p in g.projectiles() {
+            if p.kind != sc::ProjectileKind::Shell || !g.is_visible(p.pos) {
+                continue;
+            }
+            if rand::gen_range(0.0, 1.0) < trail {
+                let v = vec2(rand::gen_range(-12.0, 12.0), rand::gen_range(-14.0, 4.0));
+                self.fx
+                    .gas(px(p.pos), v, rand::gen_range(0.5, 0.9), rand::gen_range(2.5, 4.0), gas_color());
+            }
+        }
+        // Idle venting: a lazy wisp from the tube and the canister rack now and then.
+        self.vent_acc += gdt;
+        if self.vent_acc >= 0.12 {
+            self.vent_acc = 0.0;
+            for t in g.towers() {
+                if t.kind != TowerKind::Gas || !g.is_visible(t.pos) || rand::gen_range(0, 3) != 0 {
+                    continue;
+                }
+                let c = px(t.pos);
+                let aim = t.aim.map(px);
+                let (tip, dir) = gas_muzzle(c, aim);
+                let from = if rand::gen_range(0, 2) == 0 {
+                    tip
+                } else {
+                    let facing = if dir.x < 0.0 { -1.0 } else { 1.0 };
+                    vec2(c.x - 16.0 * facing + rand::gen_range(0, 3) as f32 * 4.5 * facing, c.y - 4.0)
+                };
+                let v = vec2(rand::gen_range(-6.0, 6.0), rand::gen_range(-22.0, -10.0));
+                let size = rand::gen_range(1.8, 3.2) + t.level as f32 * 0.4;
+                self.fx.gas(from, v, rand::gen_range(1.0, 1.8), size, gas_color_faint());
+            }
+        }
+    }
 
     fn simulate(&mut self, dt: f32) {
         // SILO_SHOT_NOAI=1: screenshot runs leave the silo undefended (waves still roll in).
@@ -542,7 +614,11 @@ impl App {
                 );
             }
             Event::EnemyKilled {
-                kind, pos, bounty, ..
+                kind,
+                pos,
+                dist,
+                bounty,
+                ..
             } => {
                 let p = px(pos);
                 self.fx.add(p - vec2(0.0, 10.0), 0.5, Kind::Puff);
@@ -561,18 +637,49 @@ impl App {
                         color: rgb(250, 210, 80),
                     },
                 );
-                if kind == sc::EnemyKind::Leader && playing {
-                    self.banner = Some((
-                        "LEADER DOWN".into(),
-                        "The uprising falters... for now.".into(),
-                        2.5,
-                    ));
+                if kind == sc::EnemyKind::Leader {
+                    // The flag goes down with them.
+                    self.fx
+                        .burst(PKind::Debris, p - vec2(0.0, 40.0), 8, 90.0, rgb(170, 30, 30));
+                    self.cleaning.send(self.game.map(), dist);
+                    if playing {
+                        self.banner = Some((
+                            "SENT TO CLEANING".into(),
+                            "The leader is suited up and marched to the airlock.".into(),
+                            3.0,
+                        ));
+                    }
                 }
             }
             Event::Explosion { pos, radius } => {
-                self.fx.add(px(pos), 0.8, Kind::Cloud { r: radius * TILE });
-                self.fx
-                    .burst(PKind::Ember, px(pos), 10, 120.0, rgb(170, 255, 120));
+                let c = px(pos);
+                let r = radius * TILE;
+                self.fx.add(c, 0.5, Kind::Cloud { r });
+                self.fx.burst(PKind::Ember, c, 8, 110.0, rgb(170, 255, 120));
+                // A cloud of gas rolls out over the splash area and hangs there.
+                for _ in 0..18 {
+                    let a = rand::gen_range(0.0, std::f32::consts::TAU);
+                    let v = vec2(a.cos(), a.sin() * 0.55) * rand::gen_range(0.3, 1.0) * r * 1.6;
+                    let size = rand::gen_range(0.14, 0.26) * r;
+                    let life = rand::gen_range(1.4, 2.6);
+                    self.fx.gas(c, v, life, size, gas_color());
+                }
+            }
+            Event::Shot {
+                kind: TowerKind::Gas,
+                from,
+                to,
+                ..
+            } => {
+                // The tube coughs out a jet of gas as the canister leaves.
+                let (tip, dir) = gas_muzzle(px(from), Some(px(to)));
+                for _ in 0..9 {
+                    let spread = vec2(-dir.y, dir.x) * rand::gen_range(-0.5, 0.5);
+                    let v = (dir + spread) * rand::gen_range(30.0, 110.0);
+                    let size = rand::gen_range(3.0, 6.0);
+                    self.fx
+                        .gas(tip, v, rand::gen_range(0.6, 1.3), size, gas_color());
+                }
             }
             Event::Shot {
                 kind: TowerKind::Deputy,
@@ -1646,4 +1753,15 @@ impl App {
             self.start();
         }
     }
+}
+
+/// Toxic green, varied a little per puff.
+fn gas_color() -> Color {
+    let k = rand::gen_range(0.85, 1.1);
+    Color::new(0.45 * k, 0.82 * k, 0.34 * k, 0.8)
+}
+
+fn gas_color_faint() -> Color {
+    let k = rand::gen_range(0.9, 1.1);
+    Color::new(0.55 * k, 0.8 * k, 0.45 * k, 0.45)
 }

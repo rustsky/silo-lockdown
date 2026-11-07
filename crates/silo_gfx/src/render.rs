@@ -1897,6 +1897,16 @@ fn sandbag(c: Vec2, w: f32, h: f32, alpha: f32) {
 }
 
 /// The four kinds of IT defence, each with its own silhouette so they read at a glance:
+/// Where a gas launcher's tube ends, and the direction it points (lobbed fire: always up and
+/// toward the target). Matches the tube `tower_icon` draws.
+pub fn gas_muzzle(c: Vec2, aim: Option<Vec2>) -> (Vec2, Vec2) {
+    let dx = aim.map_or(1.0, |p| p.x - c.x);
+    let facing = if dx < 0.0 { -1.0 } else { 1.0 };
+    let ad = vec2(facing * 0.55, -0.83).normalize();
+    let base = vec2(c.x + 2.0 * facing, c.y + 20.0 - 12.0);
+    (base + ad * 19.0, ad)
+}
+
 /// Deputy = a guard with a riot shield, Jammer = a tall radio mast, Gas = a squat mortar pit,
 /// Marksman = a long sniper nest. `c` is the tile centre; `aim` the target; `recoil` 0..1.
 pub fn tower_icon(kind: TowerKind, c: Vec2, level: u8, aim: Option<Vec2>, recoil: f32, alpha: f32) {
