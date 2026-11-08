@@ -174,7 +174,7 @@ impl Uprising {
                 if !(0.0..1.6).contains(&e) {
                     continue;
                 }
-                let size = 15.0 + e * 7.0;
+                let size = [15.0, 18.0, 22.0, 26.0][((e / 1.6) * 4.0).min(3.0) as usize];
                 let w = measure(slogan, size);
                 let cx = h.x + h.w + 70.0 + e * 20.0;
                 let y = h.y - 10.0 - e * 120.0;
@@ -240,7 +240,7 @@ impl Uprising {
                 let slogan = SLOGANS[(r.wave as usize - 1) % SLOGANS.len()];
                 // The bubble punches in big with a jolt, then settles.
                 let pop = (-since.max(0.0) * 9.0).exp();
-                let size = 14.0 * (1.0 + 0.6 * pop);
+                let size = if pop > 0.3 { 22.0 } else { 14.0 };
                 let jolt = vec2((time * 71.0).sin(), (time * 53.0).cos()) * 2.5 * pop;
                 let w = measure(slogan, size) + 12.0;
                 let bx = (ox - 10.0).max(4.0) + jolt.x;

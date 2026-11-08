@@ -4,12 +4,16 @@
 - Three announcements from Silo 1 over the PA: one deep voice, band-limited and driven like an
   old loudspeaker, each after a two-tone chime.
 - The crowd cheering "We're free!" as they come out of the airlock, built like the chants.
+- Victory: Silo 1 calls the Head of IT on a secure phone line to congratulate them (a different,
+  calm voice; telephone band, a line-open beep, faint static).
 
 Writes crates/silo_gfx/assets/voice_N.mp3 (mono, 40 kbps), N in the order of VOICE_* in
 crates/silo_gfx/src/sfx.rs. Needs what scripts/make-chant.py needs (macOS `say` with an
 Enhanced/Premium English voice installed, numpy, lame). Run from the repo root:
-    python3 scripts/make-voices.py
+    python3 scripts/make-voices.py           # everything
+    python3 scripts/make-voices.py win       # only the victory call
 """
+import sys
 import importlib.util
 import os
 import subprocess
@@ -25,10 +29,17 @@ spec.loader.exec_module(chant)
 SR = chant.SR
 
 ANNOUNCEMENTS = [
-    "Attention. The airlock has been breached. Silo One has initiated the Safeguard protocol.",
+    "Attention, Silo Twelve. The airlock has been breached. Silo One has initiated the Safeguard protocol.",
     "Safeguard in progress. Remain where you are.",
     "Safeguard complete. You failed to prevent the Safeguard. Game over.",
 ]
+# Silo 1's call when the silo holds (voice_4, voice_5).
+WIN_LINES = [
+    "This is Silo One, calling Silo Twelve. Head of I.T., the uprising in your silo has been put down.",
+    "Your silo held, and the Pact is preserved. Well done. The Safeguard will not be needed. Silo One out.",
+]
+CALLERS = ["Jamie (Premium)", "Oliver (Enhanced)", "Daniel (Enhanced)", "Daniel"]
+
 # Deep, calm voices for Silo 1, best first.
 ANNOUNCERS = ["Daniel (Enhanced)", "Oliver (Enhanced)", "Lee (Premium)", "Jamie (Premium)", "Daniel"]
 
@@ -79,6 +90,26 @@ def pa(speech):
     return y
 
 
+def phone(speech, first):
+    """A secure phone line: telephone band, light drive, faint hiss; a beep when the line opens."""
+    x = biquad(speech, "hp", 320.0)
+    x = biquad(x, "lp", 3000.0)
+    x = x / (np.max(np.abs(x)) + 1e-6)
+    x = np.tanh(x * 1.6) / np.tanh(1.6)
+    rng = np.random.default_rng(5)
+    hiss = biquad(rng.normal(0, 1, len(x)).astype(np.float32), "hp", 2000.0) * 0.012
+    x = x + hiss
+    if first:
+        t = np.arange(int(0.12 * SR)) / SR
+        beep = (np.sin(2 * np.pi * 1000 * t) * 0.35).astype(np.float32)
+        x = np.concatenate([beep, np.zeros(int(0.25 * SR), np.float32), x])
+    return x
+
+
+def pick(installed, names):
+    return next(v for v in names if v + " " in installed or v + "\t" in installed)
+
+
 def write_mp3(samples, path, tmp):
     samples = samples / (np.max(np.abs(samples)) + 1e-6) * 0.9
     fade = int(0.08 * SR)
@@ -93,9 +124,33 @@ def write_mp3(samples, path, tmp):
     print(f"  wrote {path} ({len(samples) / SR:.2f}s)", flush=True)
 
 
+def win_call(installed, tmp):
+    caller = pick(installed, CALLERS)
+    print(f"Silo 1 caller: {caller}", flush=True)
+    for k, line in enumerate(WIN_LINES):
+        n = len(ANNOUNCEMENTS) + 1 + k
+        print(f"call {k}: {line}", flush=True)
+        path = os.path.join(tmp, f"w{k}.wav")
+        subprocess.run(
+            ["say", "-v", caller, "-r", "158", "--file-format=WAVE",
+             f"--data-format=LEI16@{SR}", "-o", path, line],
+            check=True, timeout=60,
+        )
+        with wave.open(path) as w:
+            speech = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(np.float32) / 32768
+        # Pitched well down and slowed: cold, not quite human.
+        speech = chant.resample(speech, 0.84)
+        clip = np.concatenate([phone(speech, k == 0), np.zeros(int(0.3 * SR), np.float32)])
+        write_mp3(clip, os.path.join(chant.OUT_DIR, f"voice_{n}.mp3"), tmp)
+
+
 def main():
     installed = subprocess.run(["say", "-v", "?"], capture_output=True, text=True).stdout
-    announcer = next(v for v in ANNOUNCERS if v + " " in installed or v + "\t" in installed)
+    if sys.argv[1:] == ["win"]:
+        with tempfile.TemporaryDirectory() as tmp:
+            win_call(installed, tmp)
+        return
+    announcer = pick(installed, ANNOUNCERS)
     print(f"announcer: {announcer}", flush=True)
     with tempfile.TemporaryDirectory() as tmp:
         for n, line in enumerate(ANNOUNCEMENTS):
@@ -121,6 +176,7 @@ def main():
         words = [("We're", 1), ("free!", 1), ("We're", 1), ("free!", 1)]
         mix, people = chant.chant(words, voices, rng, tmp, "free")
         write_mp3(mix, os.path.join(chant.OUT_DIR, f"voice_{len(ANNOUNCEMENTS)}.mp3"), tmp)
+        win_call(installed, tmp)
 
 
 if __name__ == "__main__":

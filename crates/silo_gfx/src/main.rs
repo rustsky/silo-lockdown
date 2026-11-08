@@ -13,6 +13,7 @@ mod sfx;
 mod synth;
 mod ui;
 mod uprising;
+mod victory;
 
 use macroquad::experimental::coroutines::start_coroutine;
 use macroquad::prelude::*;

@@ -10,6 +10,51 @@ pub fn set_scale(s: f32) {
     SCALE.store(s.max(0.1).to_bits(), Ordering::Relaxed);
 }
 
+/// Every text size the game draws, in logical pixels. Requested sizes snap to the nearest one.
+///
+/// macroquad's font atlas doubles its texture when it fills up, and text already queued in that
+/// frame then samples a deleted texture: every glyph turns to garbage. So the game only ever
+/// uses this fixed set of sizes and caches all of them up front (`prewarm_fonts`), and the
+/// atlas never has to grow mid-game.
+const TEXT_SIZES: [f32; 23] = [
+    8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0,
+    30.0, 34.0, 40.0, 44.0, 50.0, 60.0, 120.0,
+];
+/// Sizes above this are only used for the title, in capitals: cache just those glyphs.
+const HEADLINE: f32 = 60.0;
+
+fn snap(size: f32) -> f32 {
+    *TEXT_SIZES
+        .iter()
+        .min_by(|a, b| (*a - size).abs().total_cmp(&(*b - size).abs()))
+        .unwrap()
+}
+
+/// Raster size (before macroquad's own DPI factor) for logical size `size`.
+fn raster(size: f32) -> u16 {
+    (snap(size) * scale()).round().clamp(1.0, 400.0) as u16
+}
+
+/// Scale and DPI the font cache was last filled for.
+static WARMED: AtomicU32 = AtomicU32::new(0);
+
+/// Cache every printable character at every text size for the current scale, once per
+/// scale/DPI change, before anything is drawn that frame.
+pub fn prewarm_fonts() {
+    let dpi = macroquad::miniquad::window::dpi_scale();
+    let key = (scale() * 64.0) as u32 * 1000 + (dpi * 64.0) as u32;
+    if WARMED.swap(key, Ordering::Relaxed) == key {
+        return;
+    }
+    let font = macroquad::text::get_default_font();
+    let chars: Vec<char> = (32u8..127).map(|c| c as char).chain("…–—’→".chars()).collect();
+    let caps: Vec<char> = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 :".chars().collect();
+    for size in TEXT_SIZES {
+        let px = (raster(size) as f32 * dpi).ceil() as u16;
+        font.populate_font_cache(if size > HEADLINE { &caps } else { &chars }, px);
+    }
+}
+
 fn scale() -> f32 {
     f32::from_bits(SCALE.load(Ordering::Relaxed))
 }
@@ -33,7 +78,7 @@ pub fn shade(c: Color, k: f32) -> Color {
 fn params(size: f32, color: Color) -> TextParams<'static> {
     let s = scale();
     TextParams {
-        font_size: (size * s).round().clamp(1.0, 400.0) as u16,
+        font_size: raster(size),
         font_scale: 1.0 / s,
         color,
         ..Default::default()
@@ -42,12 +87,7 @@ fn params(size: f32, color: Color) -> TextParams<'static> {
 
 pub fn measure(s: &str, size: f32) -> f32 {
     let sc = scale();
-    measure_text(
-        s,
-        None,
-        (size * sc).round().clamp(1.0, 400.0) as u16,
-        1.0 / sc,
-    )
+    measure_text(s, None, raster(size), 1.0 / sc)
     .width
 }
 

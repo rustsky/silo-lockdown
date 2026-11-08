@@ -5,6 +5,7 @@ use crate::fx::{Fx, Kind, PKind};
 use crate::judicial::Judicial;
 use crate::safeguard::Safeguard;
 use crate::uprising::Uprising;
+use crate::victory::Victory;
 use crate::light::Lighting;
 use crate::music::Music;
 use crate::render::{self, *};
@@ -75,6 +76,8 @@ pub struct App {
     chant_left: f32,
     /// Defeat cinematic: escape, drones, gas (Silo 1's Safeguard protocol).
     safeguard: Safeguard,
+    /// Victory sequence: all clear, then Silo 1 calls to congratulate.
+    victory: Victory,
     /// The rally at the generator hall that opens each wave.
     uprising: Uprising,
     /// Static placement rules per tile: [Deputy, Jammer, Gas, Marksman, Barrier][row][col]
@@ -144,6 +147,7 @@ impl App {
             judicial: Judicial::default(),
             uprising: Uprising::default(),
             safeguard: Safeguard::default(),
+            victory: Victory::default(),
             chant_left: 0.0,
             sims_hinted: false,
             spots: Vec::new(),
@@ -216,6 +220,10 @@ impl App {
                         app.field_tap(px(sc::map::tile_center(c, r)));
                     }
                 }
+            }
+            // SILO_SHOT_VICTORY=1: play the victory sequence.
+            if std::env::var("SILO_SHOT_VICTORY").is_ok() {
+                app.victory.start();
             }
             // SILO_SHOT_SAFEGUARD=N: play the defeat sequence with N rebels breaking out.
             if let Some(n) = std::env::var("SILO_SHOT_SAFEGUARD").ok().and_then(|v| v.parse().ok()) {
@@ -349,7 +357,11 @@ impl App {
         };
         // The music ducks under the crowd's chant and swells back as it ends.
         self.chant_left = (self.chant_left - dt).max(0.0);
-        let duck = if self.chant_left > 0.0 || self.safeguard.active() { 0.3 } else { 1.0 };
+        let duck = if self.chant_left > 0.0 || self.safeguard.active() || self.victory.on_the_line() {
+            0.3
+        } else {
+            1.0
+        };
         if let Some(m) = &mut self.music {
             m.update(dt, intensity, volume, duck);
         }
@@ -371,6 +383,7 @@ impl App {
         self.judicial.clear();
         self.uprising.clear();
         self.safeguard.clear();
+        self.victory.clear();
         self.sims_hinted = false;
         self.speed = 1;
         self.paused = false;
@@ -422,6 +435,7 @@ impl App {
         let (sw, sh) = (screen_width(), screen_height());
         let scale = (sw / W).min(sh / H);
         set_scale(scale);
+        prewarm_fonts();
         let (vw, vh) = (sw / scale, sh / scale);
         let shake = if self.fx.shake > 0.0 {
             vec2(rand::gen_range(-4.0, 4.0), rand::gen_range(-4.0, 4.0)) * self.fx.shake * 2.0
@@ -509,6 +523,7 @@ impl App {
         self.fx.draw();
         self.safeguard.draw_surface(self.time);
         self.uprising.draw(&self.game, self.time);
+        self.victory.draw_world(self.time);
         self.judicial.draw(&self.game, self.time);
         self.cleaning.draw(&self.game, self.time);
         self.field_overlays(&ui, world_pointer);
@@ -531,8 +546,7 @@ impl App {
         }
         self.draw_banner();
         self.fx.draw_toast(W / 2.0, PANEL_Y - 24.0);
-        // The end card covers everything in the field.
-        self.safeguard.draw_card();
+
 
         match self.screen {
             Screen::Title => self.title(&mut ui),
@@ -540,10 +554,14 @@ impl App {
                 self.hud(&mut ui);
                 self.panel(&mut ui);
                 self.navigator(&mut ui);
-                if self.safeguard.active() {
-                    // A tap on the field skips the Safeguard sequence.
+                // Ending screens sit on top of everything in the field, the level slider too.
+                self.safeguard.draw_card();
+                self.victory.draw_screen(self.time);
+                if self.safeguard.active() || self.victory.active() {
+                    // A tap on the field skips the ending sequence.
                     if ui.hit(Rect::new(0.0, HUD_H, W, FIELD_H)) {
                         self.safeguard.skip();
+                        self.victory.skip();
                     }
                 } else if self.game.is_over() {
                     self.game_over(&mut ui);
@@ -588,6 +606,13 @@ impl App {
         {
             self.safeguard.skip();
         }
+        if self.screen == Screen::Playing
+            && self.victory.active()
+            && (is_key_pressed(KeyCode::Space) || is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::Escape))
+        {
+            self.victory.skip();
+        }
+        let won = self.victory.update(dt);
         let cues = self.safeguard.update(dt);
         let voice = |app: &mut Self, v: usize| {
             if app.screen == Screen::Playing
@@ -596,6 +621,15 @@ impl App {
                 s.play_variant(Sfx::Voice, v, 1.0);
             }
         };
+        if won.ring {
+            self.sound(Sfx::Ring, None);
+        }
+        if won.line_open {
+            self.sound(Sfx::Jammer, None);
+        }
+        if let Some(n) = won.line {
+            voice(self, [crate::sfx::VOICE_SILO1_HELLO, crate::sfx::VOICE_SILO1_WELL_DONE][n]);
+        }
         if cues.freed {
             voice(self, crate::sfx::VOICE_WE_ARE_FREE);
         }
@@ -606,7 +640,7 @@ impl App {
             voice(self, crate::sfx::VOICE_BREACH);
             self.banner = Some((
                 "SAFEGUARD".into(),
-                "Silo 1 has initiated the Safeguard protocol.".into(),
+                "Silo 1 has initiated the Safeguard protocol on Silo 12.".into(),
                 3.5,
             ));
             self.fx.red_flash = 0.6;
@@ -1096,6 +1130,7 @@ impl App {
                     },
                 );
             }
+            Event::Won if playing => self.victory.start(),
             Event::Lost => {
                 self.fx.shake = 0.8;
                 if playing {
@@ -1316,7 +1351,7 @@ impl App {
     fn update_scroll(&mut self, dt: f32) {
         self.view_label = (self.view_label - dt).max(0.0);
         // The Safeguard sequence drives the camera.
-        if let Some(s) = self.safeguard.camera(max_scroll()) {
+        if let Some(s) = self.safeguard.camera(max_scroll()).or(self.victory.camera(max_scroll())) {
             self.scroll = s;
             return;
         }
@@ -2289,7 +2324,7 @@ impl App {
         let y = 260.0;
         text_shadow("SILO", W / 2.0, y, 120.0, rgb(230, 200, 120));
         text_shadow("LOCKDOWN", W / 2.0, y + 60.0, 44.0, rgb(200, 200, 200));
-        let body = "You are IT. The uprising climbs the spiral stair from Mechanical, \
+        let body = "You are IT of Silo 12. The uprising climbs the spiral stair from Mechanical, \
                     level by level. If they reach the airlock, the silo is opened and \
                     everyone will see the outside. Hold the Pact.";
         for (i, l) in wrap(body, 20.0, W - 120.0).iter().enumerate() {
@@ -2335,13 +2370,13 @@ impl App {
         );
         let (title, body) = if won {
             (
-                "THE SILO HOLDS",
+                "SILO 12 HOLDS",
                 "The Pact is preserved. The outside remains a secret.",
             )
         } else {
             (
                 "GAME OVER",
-                "You failed to prevent the Safeguard: the uprising broke out, and Silo 1 sealed the silo.",
+                "You failed to prevent the Safeguard: the uprising broke out, and Silo 1 sealed Silo 12.",
             )
         };
         text_shadow(

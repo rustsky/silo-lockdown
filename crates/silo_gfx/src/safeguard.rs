@@ -13,10 +13,10 @@ use std::f32::consts::PI;
 const SAFEGUARD_AT: f32 = 3.2;
 /// The drones fly in.
 const DRONES_AT: f32 = 3.9;
-/// The gas never starts before Silo 1's first announcement (7.7 s from the alarm) is over...
-const GAS_EARLIEST: f32 = SAFEGUARD_AT + 7.3;
+/// The gas never starts before Silo 1's first announcement (9.3 s from the alarm) is over...
+const GAS_EARLIEST: f32 = SAFEGUARD_AT + 8.9;
 /// ...and starts by this time even if a drone is still busy.
-const GAS_LATEST: f32 = 12.5;
+const GAS_LATEST: f32 = 14.0;
 /// Gas takes this long to sink from the top of the silo to the generator hall.
 const GAS_T: f32 = 6.0;
 /// The end card shows this long before the game-over panel (the "game over" line fits).
@@ -319,7 +319,7 @@ impl Safeguard {
             Color::new(0.8, 0.8, 0.76, k),
         );
         text_centered(
-            "and Silo 1 sealed the silo. No one is left to remember.",
+            "and Silo 1 sealed Silo 12. No one is left to remember.",
             W / 2.0,
             y + 84.0,
             15.0,

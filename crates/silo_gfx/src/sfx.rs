@@ -37,6 +37,8 @@ pub enum Sfx {
     /// Spoken lines of the defeat sequence: Silo 1's announcements and the escaping crowd
     /// (recordings, scripts/make-voices.py). Play one with `play_variant` and a `VOICE_*`.
     Voice,
+    /// An old desk phone ringing (Silo 1 calling).
+    Ring,
 }
 
 /// `Sfx::Voice` variants.
@@ -44,9 +46,11 @@ pub const VOICE_BREACH: usize = 0;
 pub const VOICE_GAS: usize = 1;
 pub const VOICE_GAME_OVER: usize = 2;
 pub const VOICE_WE_ARE_FREE: usize = 3;
+pub const VOICE_SILO1_HELLO: usize = 4;
+pub const VOICE_SILO1_WELL_DONE: usize = 5;
 
 impl Sfx {
-    pub const ALL: [Sfx; 24] = [
+    pub const ALL: [Sfx; 25] = [
         Sfx::Deputy,
         Sfx::Marksman,
         Sfx::Gas,
@@ -71,6 +75,7 @@ impl Sfx {
         Sfx::Click,
         Sfx::Roar,
         Sfx::Voice,
+        Sfx::Ring,
     ];
 
     /// Minimum seconds between two plays of this sound, and its base volume.
@@ -120,12 +125,27 @@ const CHANTS: [&[u8]; 10] = [
 ];
 
 /// The defeat sequence's spoken lines, in `VOICE_*` order (scripts/make-voices.py).
-const VOICES: [&[u8]; 4] = [
+const VOICES: [&[u8]; 6] = [
     include_bytes!("../assets/voice_0.mp3"),
     include_bytes!("../assets/voice_1.mp3"),
     include_bytes!("../assets/voice_2.mp3"),
     include_bytes!("../assets/voice_3.mp3"),
+    include_bytes!("../assets/voice_4.mp3"),
+    include_bytes!("../assets/voice_5.mp3"),
 ];
+
+/// Loudness of voice line `v` (a `VOICE_*`), one value (0..1) per 1/60 s: lets the screen
+/// move with the words.
+pub fn voice_envelope(v: usize) -> Vec<f32> {
+    let (pcm, rate) = decode_mp3(VOICES[v]);
+    let hop = (rate / 60).max(1) as usize;
+    let rms: Vec<f32> = pcm
+        .chunks(hop)
+        .map(|c| (c.iter().map(|x| x * x).sum::<f32>() / c.len() as f32).sqrt())
+        .collect();
+    let peak = rms.iter().cloned().fold(1e-6, f32::max);
+    rms.iter().map(|r| (r / peak).min(1.0)).collect()
+}
 
 /// Decode one of our mono MP3s: (samples, sample rate).
 fn decode_mp3(bytes: &[u8]) -> (Vec<f32>, u32) {
@@ -469,6 +489,21 @@ fn synth(kind: Sfx, seed: u32) -> Vec<f32> {
         }
         Sfx::Roar => decode_mp3(CHANTS[seed as usize - 1]).0,
         Sfx::Voice => decode_mp3(VOICES[seed as usize - 1]).0,
+        Sfx::Ring => {
+            // Electromechanical bell: 440 + 480 Hz, warbling 20 times a second, two bursts.
+            let mut b = Buf::new(1.15);
+            b.add(0.0, |t| {
+                let on = (0.0..0.42).contains(&t) || (0.62..1.04).contains(&t);
+                if !on {
+                    return 0.0;
+                }
+                let u = if t < 0.5 { t } else { t - 0.62 };
+                let env = (u / 0.01).min(1.0) * (1.0 - ((u - 0.38) / 0.04).clamp(0.0, 1.0));
+                let warble = 0.6 + 0.4 * (TAU * 20.0 * t).sin().signum();
+                ((TAU * 440.0 * t).sin() + (TAU * 480.0 * t).sin()) * warble * env * 0.35
+            });
+            b.finish()
+        }
     }
 }
 

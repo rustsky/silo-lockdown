@@ -1143,7 +1143,7 @@ fn prop(p: &PropInst, time: f32) {
             let r = Rect::new(p.x - 22.0, fl - 38.0, 44.0, 20.0);
             draw_rectangle(r.x - 2.0, r.y - 2.0, r.w + 4.0, r.h + 4.0, rgb(120, 86, 54));
             draw_rectangle(r.x, r.y, r.w, r.h, rgb(40, 70, 52));
-            for (i, l) in ["2+2=4", "SILO 18"].iter().enumerate() {
+            for (i, l) in ["2+2=4", "SILO 12"].iter().enumerate() {
                 text(
                     l,
                     r.x + 4.0,

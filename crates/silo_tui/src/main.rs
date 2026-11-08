@@ -175,7 +175,7 @@ impl App {
                 let line = (1..n).map(|i| to_cell(from.lerp(to, i as f32 / n as f32))).collect();
                 self.effect(line, '∙', Color::LightRed, 3);
             }
-            Event::Won => self.say(Line::from("THE SILO HOLDS. The Pact endures.").green().bold()),
+            Event::Won => self.say(Line::from("SILO 12 HOLDS. The Pact endures.").green().bold()),
             Event::Lost => self.say(Line::from("THE AIRLOCK IS OPEN. They see the outside.").red().bold()),
             Event::EnemyShot { from, to, .. } => {
                 let n = (from.distance(to) * 8.0).ceil() as i32;
@@ -439,7 +439,7 @@ impl App {
         let r = Rect::new(field.x + (field.width - w) / 2, field.y + (field.height - h) / 2, w, h);
         let t = self.game.totals();
         let (title, color, text) = if won {
-            (" THE SILO HOLDS ", Color::Green, "The Pact is preserved.\nThe outside stays a secret.")
+            (" SILO 12 HOLDS ", Color::Green, "The Pact is preserved.\nThe outside stays a secret.")
         } else {
             (" THE AIRLOCK IS OPEN ", Color::Red, "The rebels step outside.\nIT has failed the silo.")
         };
