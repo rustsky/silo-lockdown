@@ -81,6 +81,19 @@ cargo build --release -p silo_gfx --target aarch64-apple-ios
 Then put the binary in a `.app` bundle with an `Info.plist` and sign it
 (see the [macroquad iOS guide](https://macroquad.rs/articles/ios/)).
 
+## Play online (GitHub Pages)
+
+`.github/workflows/pages.yml` tests the game, builds the web version and publishes it on every
+push to `main`/`master`. One-time setup on GitHub: **Settings → Pages → Source: GitHub Actions**.
+The game is then at `https://<user>.github.io/<repo>/`, playable in any browser and installable
+from Safari/Chrome ("Add to Home Screen") to run offline.
+
+**Player counts.** The title screen of the published web version shows how many people are
+playing right now and how many have played so far (`web/stats.js`). It uses two public counters
+on [abacus](https://abacus.jasoncameron.dev) (free, no account): one goes up once per device, the
+other once every 30 s per open game, and the game reads "playing now" from how fast that one
+rises. Nothing personal is stored. Local and single-file builds don't count and hide the panel.
+
 ## Music and sound
 
 All audio is synthesised at startup (no audio files):

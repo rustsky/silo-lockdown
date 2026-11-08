@@ -22,14 +22,22 @@
 <body>
   <canvas id="glcanvas" tabindex="1"></canvas>
   <!-- miniquad's and quad-snd's JS loaders, vendored from the exact versions we build
-       against (miniquad 0.4.11, quad-snd 0.2.8), plus our iOS audio unlock. -->
+       against (miniquad 0.4.11, quad-snd 0.2.8), plus our iOS audio unlock and the live player count. -->
   <script src="gl.js"></script>
   <script src="audio.js"></script>
   <script src="audio-unlock.js"></script>
+  <script src="stats.js"></script>
   <script>
     load("silo_gfx.wasm");
     if ("serviceWorker" in navigator && location.protocol === "https:") {
-      navigator.serviceWorker.register("sw.js").catch(function () {});
+      // A new version finished downloading in the background and took over. If the game only
+      // just opened, restart into it now; otherwise it starts the next time the game is opened.
+      var hadCopy = !!navigator.serviceWorker.controller, opened = Date.now();
+      navigator.serviceWorker.addEventListener("controllerchange", function () {
+        if (hadCopy && Date.now() - opened < 30000) location.reload();
+      });
+      // updateViaCache "none": the version check always asks the server, never a cached sw.js.
+      navigator.serviceWorker.register("sw.js", { updateViaCache: "none" }).catch(function () {});
     }
   </script>
 </body>

@@ -1,6 +1,7 @@
-// Offline support: cache the whole game on the device on first visit, then serve it from the
-// cache, so the installed app (Add to Home Screen) runs without a network.
-// CACHE_VERSION is replaced at build time with a hash of the build.
+// The game runs from a copy on the device: after the first visit nothing is downloaded again
+// (also offline, and as an installed Add to Home Screen app). Only the player stats go out.
+// Each build stamps its own CACHE_VERSION into this file, so the browser's routine check of
+// sw.js spots a new version, downloads it in the background and swaps it in (see index.html).
 const CACHE = "silo-CACHE_VERSION";
 const FILES = [
   "./",
@@ -8,6 +9,7 @@ const FILES = [
   "./gl.js",
   "./audio.js",
   "./audio-unlock.js",
+  "./stats.js",
   "./silo_gfx.wasm",
   "./manifest.webmanifest",
   "./icon-192.png",
@@ -16,7 +18,10 @@ const FILES = [
 ];
 
 self.addEventListener("install", (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES)).then(() => self.skipWaiting()));
+  // cache: "reload" skips the browser's HTTP cache (GitHub Pages lets it keep files 10 minutes),
+  // or a new version could be stored with the previous version's files.
+  const fresh = FILES.map((f) => new Request(f, { cache: "reload" }));
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(fresh)).then(() => self.skipWaiting()));
 });
 
 self.addEventListener("activate", (e) => {
@@ -29,8 +34,8 @@ self.addEventListener("activate", (e) => {
 });
 
 self.addEventListener("fetch", (e) => {
-  if (e.request.method !== "GET") return;
-  e.respondWith(
-    caches.match(e.request, { ignoreSearch: true }).then((hit) => hit || fetch(e.request))
-  );
+  const req = e.request;
+  // Only the game's own files; the player stats go straight to the network.
+  if (req.method !== "GET" || new URL(req.url).origin !== self.location.origin) return;
+  e.respondWith(caches.match(req, { ignoreSearch: true }).then((hit) => hit || fetch(req)));
 });

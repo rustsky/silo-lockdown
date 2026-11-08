@@ -14,6 +14,7 @@ b64 = base64.b64encode(wasm).decode()
 gl = (web / "gl.js").read_text()
 audio = (web / "audio.js").read_text()
 unlock = (web / "audio-unlock.js").read_text()
+stats = (web / "stats.js").read_text()
 html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -31,6 +32,7 @@ html = f"""<!DOCTYPE html>
 <script>{gl}</script>
 <script>{audio}</script>
 <script>{unlock}</script>
+<script>{stats}</script>
 <script id="wasm" type="application/octet-stream">{b64}</script>
 <script>
   // The game is embedded below as base64; hand it to miniquad's loader as a Blob URL so the

@@ -10,6 +10,7 @@ mod music;
 mod render;
 mod safeguard;
 mod sfx;
+mod stats;
 mod synth;
 mod ui;
 mod uprising;

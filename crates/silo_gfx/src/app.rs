@@ -10,6 +10,7 @@ use crate::light::Lighting;
 use crate::music::Music;
 use crate::render::{self, *};
 use crate::sfx::{Sfx, SoundBank};
+use crate::stats;
 use crate::ui::*;
 use macroquad::prelude::*;
 use silo_core as sc;
@@ -1837,23 +1838,16 @@ impl App {
             draw_rectangle(332.0, 58.0, 120.0 * f, 7.0, rgb(90, 160, 255));
         }
 
-        // Speed / pause / autopilot.
+        // Live player count (web only), then speed / pause / sound. Autopilot stays on the T key.
         let b = |i: f32| Rect::new(W - 190.0 + i * 47.0, 10.0, 43.0, 52.0);
+        self.live_count(b(0.0));
         let speed = format!("{}x", self.speed);
-        if ui.button(b(0.0), &[&speed], true, rgb(120, 160, 220)) {
+        if ui.button(b(1.0), &[&speed], true, rgb(120, 160, 220)) {
             self.cycle_speed();
         }
         let pause = if self.paused { "GO" } else { "II" };
-        if ui.button(b(1.0), &[pause], true, rgb(200, 200, 200)) {
+        if ui.button(b(2.0), &[pause], true, rgb(200, 200, 200)) {
             self.paused = !self.paused;
-        }
-        let ai_col = if self.autopilot {
-            rgb(90, 230, 230)
-        } else {
-            rgb(110, 120, 130)
-        };
-        if ui.button(b(2.0), &["AI"], true, ai_col) {
-            self.autopilot = !self.autopilot;
         }
         // Music on/off: a little speaker icon.
         let muted = self.audio_mode == 2 || (self.music.is_none() && self.sfx.is_none());
@@ -2358,13 +2352,66 @@ impl App {
         {
             self.start();
         }
+        self.census(y + 400.0);
         text_centered(
-            "1-4 build  5 barrier  N wave  U upgrade  X sell  W/S roll  F speed  T AI  M sound",
+            "1-4 build  5 barrier  N wave  U upgrade  X sell  W/S roll  F speed  M sound",
             W / 2.0,
             H - 40.0,
             15.0,
             rgb(140, 140, 140),
         );
+    }
+
+    /// Player numbers in the HUD: players online now (pulsing dot) over the total so far.
+    fn live_count(&self, r: Rect) {
+        let (online, players) = (stats::online(), stats::players());
+        if online.is_none() && players.is_none() {
+            return;
+        }
+        let green = rgb(110, 220, 130);
+        let cx = r.x + r.w / 2.0 - 8.0; // the total is wider than the slot: lean into the gap
+        let pulse = 0.45 + 0.55 * (self.time * 2.5).sin().abs();
+        let n = online.map_or("...".to_string(), stats::grouped);
+        let size = if n.len() > 3 { 16.0 } else { 22.0 };
+        let w = measure(&n, size) + 12.0;
+        let dot_y = r.y + 26.0 - size * 0.35; // middle of the digits
+        draw_circle(cx - w / 2.0 + 4.0, dot_y, 4.0, with_alpha(green, pulse));
+        text(&n, cx - w / 2.0 + 12.0, r.y + 26.0, size, green);
+        text_centered("NOW", cx, r.y + 37.0, 9.0, rgb(140, 160, 145));
+        if let Some(p) = players {
+            let total = format!("{} TOTAL", stats::grouped(p));
+            text_centered(&total, cx, r.y + 50.0, 10.0, rgb(175, 180, 175));
+        }
+    }
+
+    /// Live player numbers under the title (web version only; hidden when there are none).
+    fn census(&self, top: f32) {
+        let players = stats::players();
+        let online = stats::online();
+        if players.is_none() && online.is_none() {
+            return;
+        }
+        let r = Rect::new(W / 2.0 - 130.0, top, 260.0, 64.0);
+        panel(r, rgb(22, 26, 24), rgb(60, 90, 70));
+        let green = rgb(110, 220, 130);
+        let now = match online {
+            Some(1) => "1 PLAYING NOW".to_string(),
+            Some(n) => format!("{} PLAYING NOW", stats::grouped(n)),
+            None => "COUNTING...".to_string(),
+        };
+        let dot = 0.45 + 0.55 * (self.time * 2.5).sin().abs();
+        let w = measure(&now, 20.0);
+        let x = W / 2.0 - w / 2.0 + 8.0;
+        draw_circle(x - 14.0, top + 21.0, 5.0, with_alpha(green, dot));
+        text(&now, x, top + 28.0, 20.0, green);
+        if let Some(p) = players {
+            let all = if p == 1 {
+                "1 PLAYER SO FAR".to_string()
+            } else {
+                format!("{} PLAYERS SO FAR", stats::grouped(p))
+            };
+            text_centered(&all, W / 2.0, top + 52.0, 15.0, rgb(160, 170, 160));
+        }
     }
 
     fn game_over(&mut self, ui: &mut Ui) {
