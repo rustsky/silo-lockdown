@@ -2700,9 +2700,26 @@ fn it_room(game: &Game, time: f32) {
 /// The main generator hall at the bottom of the Down Deep: steel plating, copper pipes, a big
 /// generator with glowing coils, a pumping piston and a spinning flywheel, and gauges.
 /// Every uprising rallies in front of it.
-fn power_room(time: f32, light: &mut Lighting) {
+/// The generator's running state, kept between frames so it spins down and up smoothly:
+/// (flywheel angle, piston phase, speed 0 = stopped .. 1 = running).
+static GENERATOR: std::sync::Mutex<(f32, f32, f32)> = std::sync::Mutex::new((0.0, 0.0, 1.0));
+
+fn power_room(game: &Game, time: f32, light: &mut Lighting) {
     let r = room_rect(&sc::map::POWER_ROOM);
     let fl = r.y + r.h;
+    // Mechanical has cut the main power: the generator winds down and stops.
+    let cut = !game.blackouts().is_empty();
+    let (spin, pump, speed) = {
+        let dt = get_frame_time().min(0.1);
+        let mut g = GENERATOR.lock().unwrap();
+        let target = if cut { 0.0 } else { 1.0 };
+        // Slow to wind down (a heavy flywheel), quicker to start again.
+        let rate = if cut { 0.45 } else { 1.2 };
+        g.2 += (target - g.2).clamp(-rate * dt, rate * dt);
+        g.0 += 5.0 * g.2 * dt;
+        g.1 += 7.0 * g.2 * dt;
+        *g
+    };
     // Riveted steel plates.
     let (pw, ph): (f32, f32) = (28.0, 26.0);
     let mut y = r.y;
@@ -2743,7 +2760,8 @@ fn power_room(time: f32, light: &mut Lighting) {
         draw_circle(c.x, c.y, 5.0, rgb(226, 222, 206));
         draw_line(c.x - 3.5, c.y + 2.0, c.x - 2.0, c.y + 1.0, 1.4, rgb(60, 160, 70));
         draw_line(c.x + 3.5, c.y + 2.0, c.x + 2.0, c.y + 1.0, 1.4, rgb(200, 50, 40));
-        let a = -PI * 0.75 + (0.6 + 0.35 * (time * (1.3 + i as f32 * 0.7)).sin()) * PI * 1.5 / 1.0;
+        // Needles drop to zero with the power.
+        let a = -PI * 0.75 + speed * (0.6 + 0.35 * (time * (1.3 + i as f32 * 0.7)).sin()) * PI * 1.5;
         draw_line(c.x, c.y, c.x + a.cos() * 4.0, c.y + a.sin() * 4.0, 1.0, rgb(20, 20, 20));
     }
     // Danger sign with a lightning bolt.
@@ -2764,7 +2782,7 @@ fn power_room(time: f32, light: &mut Lighting) {
     draw_rectangle(body.x, body.y + 3.0, body.w, 3.0, rgb(104, 132, 118));
     draw_rectangle(body.x, body.y + body.h - 5.0, body.w, 3.0, rgb(44, 60, 52));
     // ...copper coil bands that glow with the load...
-    let glow = 0.55 + 0.45 * (time * 3.1).sin().abs();
+    let glow = (0.55 + 0.45 * (time * 3.1).sin().abs()) * speed * speed;
     for i in 0..5 {
         let x = body.x + 8.0 + i as f32 * 9.0;
         draw_rectangle(x, body.y, 4.0, body.h, rgb(170, 100, 50));
@@ -2776,7 +2794,7 @@ fn power_room(time: f32, light: &mut Lighting) {
         Color::new(1.0, 0.6, 0.3, 0.45 * glow),
     );
     // ...a piston pumping on top...
-    let stroke = (time * 7.0).sin() * 5.0;
+    let stroke = pump.sin() * 5.0;
     draw_rectangle(body.x + 30.0, body.y - 14.0, 10.0, 14.0, rgb(80, 82, 86));
     draw_rectangle(body.x + 33.0, body.y - 24.0 + stroke, 4.0, 14.0, rgb(180, 184, 190));
     draw_rectangle(body.x + 31.0, body.y - 26.0 + stroke, 8.0, 3.0, rgb(120, 124, 130));
@@ -2787,14 +2805,13 @@ fn power_room(time: f32, light: &mut Lighting) {
     let fw = vec2(body.x + body.w + 10.0, fl - 24.0);
     draw_circle(fw.x, fw.y, 17.0, rgb(30, 32, 34));
     draw_circle_lines(fw.x, fw.y, 17.0, 3.0, rgb(110, 114, 120));
-    let spin = time * 5.0;
     for i in 0..6 {
         let a = spin + i as f32 * PI / 3.0;
         let d = vec2(a.cos(), a.sin());
         draw_line(fw.x, fw.y, fw.x + d.x * 15.0, fw.y + d.y * 15.0, 2.0, rgb(140, 144, 150));
     }
-    // Motion blur ring and hub.
-    draw_circle_lines(fw.x, fw.y, 10.0, 6.0, rgba(140, 144, 150, 50));
+    // Motion blur ring (only while it's turning fast) and hub.
+    draw_circle_lines(fw.x, fw.y, 10.0, 6.0, rgba(140, 144, 150, (50.0 * speed) as u8));
     draw_circle(fw.x, fw.y, 4.0, rgb(200, 170, 60));
     draw_line(body.x + body.w, fw.y, fw.x, fw.y, 3.0, rgb(150, 154, 160));
     // Hazard strip along the floor.
@@ -2806,6 +2823,36 @@ fn power_room(time: f32, light: &mut Lighting) {
         draw_triangle(vec2(hx, fl), vec2(hx, fl - 3.0), vec2(hx + 6.0, fl - 3.0), c);
         hx += 6.0;
         k += 1;
+    }
+    if cut || speed < 0.99 {
+        let dead = 1.0 - speed;
+        // Black smoke from the stalled engine's exhaust.
+        let ex = vec2(body.x + 11.0, r.y + 22.0);
+        for i in 0..6 {
+            let k = (time * 0.6 + i as f32 / 6.0) % 1.0;
+            let p = ex + vec2((time * 1.7 + i as f32).sin() * 6.0 * k + k * 10.0, -k * 6.0 + 10.0 * k);
+            draw_circle(p.x, p.y + 6.0, 3.0 + 7.0 * k, Color::new(0.12, 0.12, 0.12, 0.5 * (1.0 - k) * dead));
+        }
+        // The odd spark from the dead coils.
+        if (time * 9.3).sin() > 0.93 {
+            let sx = body.x + 10.0 + ((time * 37.0).sin() * 0.5 + 0.5) * 36.0;
+            draw_line(sx, body.y + 6.0, sx + 3.0, body.y + 1.0, 1.5, rgba(255, 230, 150, (230.0 * dead) as u8));
+            draw_line(sx + 3.0, body.y + 1.0, sx - 1.0, body.y - 4.0, 1.5, rgba(255, 230, 150, (230.0 * dead) as u8));
+        }
+        // Red emergency light sweeping the hall, and the warning sign.
+        if cut {
+            let beat = (time * 4.0).sin() * 0.5 + 0.5;
+            draw_rectangle(r.x, r.y + 18.0, r.w, r.h - 18.0, Color::new(0.7, 0.02, 0.0, 0.18 * beat));
+            let bc = vec2(r.x + r.w - 14.0, r.y + 24.0);
+            draw_circle(bc.x, bc.y, 4.0, Color::new(1.0, 0.1 + 0.3 * beat, 0.05, 1.0));
+            light.add(bc, 80.0, Color::new(1.0, 0.1, 0.05, 0.5 * beat));
+            if (time * 3.0).fract() < 0.75 {
+                let label = "NO POWER";
+                let w = measure(label, 13.0) + 10.0;
+                draw_rectangle(r.x + r.w / 2.0 - w / 2.0, r.y + 46.0, w, 17.0, rgba(40, 6, 4, 230));
+                text_centered(label, r.x + r.w / 2.0, r.y + 59.0, 13.0, rgb(255, 90, 70));
+            }
+        }
     }
     facade(r, rgb(230, 190, 40), "GENERATOR", "", rgb(240, 210, 120));
 }
@@ -3169,13 +3216,20 @@ pub fn darkness(game: &Game, time: f32) {
         } else {
             0.99
         };
-        draw_rectangle(
-            TILE,
-            y,
-            W - 2.0 * TILE,
-            h,
-            Color::new(0.01, 0.01, 0.02, flick),
-        );
+        // Everything goes black but the generator hall: its emergency light keeps it visible.
+        let dark = Color::new(0.01, 0.01, 0.02, flick);
+        let hall = room_rect(&sc::map::POWER_ROOM);
+        let hall = Rect::new(hall.x, hall.y, hall.w, hall.h + 8.0);
+        let (x0, x1, y1) = (TILE, W - TILE, y + h);
+        if hall.y < y1 && hall.y + hall.h > y {
+            let (gy0, gy1) = (hall.y.max(y), (hall.y + hall.h).min(y1));
+            draw_rectangle(x0, y, x1 - x0, gy0 - y, dark);
+            draw_rectangle(x0, gy1, x1 - x0, y1 - gy1, dark);
+            draw_rectangle(x0, gy0, hall.x - x0, gy1 - gy0, dark);
+            draw_rectangle(hall.x + hall.w, gy0, x1 - hall.x - hall.w, gy1 - gy0, dark);
+        } else {
+            draw_rectangle(x0, y, x1 - x0, h, dark);
+        }
         let cy = y + h / 2.0;
         let name = SECTIONS[sc::map::section_of_row(b.first)].0;
         text_centered("NO POWER", W / 2.0, cy - 6.0, 34.0, rgba(150, 130, 90, 220));
@@ -3564,7 +3618,7 @@ pub fn world(game: &Game, decor: &Decor, time: f32, flash: f32, light: &mut Ligh
     silo(game, decor, time, light, vis);
     it_room(game, time);
     supply_room(game, time);
-    power_room(time, light);
+    power_room(game, time, light);
     // ...and the key rooms ignore the gloom entirely.
     for tiles in [&sc::map::IT_ROOM[..], &sc::map::SUPPLY_ROOM[..], &sc::map::POWER_ROOM[..]] {
         let r = room_rect(tiles);

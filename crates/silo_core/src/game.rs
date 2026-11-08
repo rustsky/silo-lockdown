@@ -446,6 +446,17 @@ impl Game {
     pub fn blackouts(&self) -> &[Blackout] {
         &self.blackouts
     }
+    /// Debug hook (screenshot runs): cut the power to section `s` for `seconds`, as Mechanical
+    /// would. Only during a wave.
+    #[doc(hidden)]
+    pub fn debug_power_cut(&mut self, s: usize, seconds: f32) {
+        if self.phase != Phase::Wave {
+            return;
+        }
+        let (_, first, last) = SECTIONS[s.min(SECTIONS.len() - 1)];
+        self.blackouts.push(Blackout { first, last, time_left: seconds });
+        self.emit(Event::PowerCut { first, last, seconds });
+    }
     /// True if map row `r` is hidden from the player (power cut, or no cameras there).
     pub fn is_row_dark(&self, r: i32) -> bool {
         (self.cameras_down() && r > SECTIONS[0].2)

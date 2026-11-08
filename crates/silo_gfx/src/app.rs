@@ -407,6 +407,17 @@ impl App {
         let dt = get_frame_time().min(0.1);
         self.time += dt;
         self.frame += 1;
+        // SILO_SHOT_POWERCUT=N,S: at frame N, cut the power to section S (0-2) for 20 s.
+        if self.shot.is_some()
+            && let Some(v) = std::env::var("SILO_SHOT_POWERCUT").ok()
+        {
+            let n: Vec<u32> = v.split(',').filter_map(|x| x.parse().ok()).collect();
+            if let [at, s] = n[..]
+                && self.frame == at
+            {
+                self.game.debug_power_cut(s as usize, 20.0);
+            }
+        }
         // SILO_SHOT_ARREST=N: at frame N pick the rebel nearest the middle of the view, and
         // arrest them 20 frames later (unless SILO_SHOT_ARREST_HOLD is set: panel shot).
         if self.shot.is_some()
