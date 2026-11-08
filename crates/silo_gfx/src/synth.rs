@@ -24,6 +24,11 @@ impl Lcg {
 
 /// Encode samples as a 16-bit mono WAV, normalised so the loudest sample hits `peak`.
 pub fn wav(buf: &[f32], peak: f32) -> Vec<u8> {
+    wav_at(buf, peak, SR)
+}
+
+/// Same, at sample rate `rate`.
+pub fn wav_at(buf: &[f32], peak: f32, rate: u32) -> Vec<u8> {
     let max = buf.iter().fold(0.0f32, |m, x| m.max(x.abs())).max(1e-6);
     let k = peak / max;
     let data_len = (buf.len() * 2) as u32;
@@ -34,8 +39,8 @@ pub fn wav(buf: &[f32], peak: f32) -> Vec<u8> {
     out.extend_from_slice(&16u32.to_le_bytes());
     out.extend_from_slice(&1u16.to_le_bytes()); // PCM
     out.extend_from_slice(&1u16.to_le_bytes()); // mono
-    out.extend_from_slice(&SR.to_le_bytes());
-    out.extend_from_slice(&(SR * 2).to_le_bytes());
+    out.extend_from_slice(&rate.to_le_bytes());
+    out.extend_from_slice(&(rate * 2).to_le_bytes());
     out.extend_from_slice(&2u16.to_le_bytes());
     out.extend_from_slice(&16u16.to_le_bytes());
     out.extend_from_slice(b"data");

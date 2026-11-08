@@ -28,6 +28,8 @@ pub enum PKind {
     Debris,
     /// Soft billowing gas: grows, drifts up a little and thins out.
     Gas,
+    /// A thrown leaflet: flutters and sways down slowly.
+    Paper,
 }
 
 pub struct Particle {
@@ -125,14 +127,20 @@ impl Fx {
                 PKind::Spark => 350.0,
                 PKind::Ember => -40.0,
                 PKind::Gas => -18.0,
+                PKind::Paper => 70.0,
             };
             p.vel.y += gravity * dt;
             let drag = match p.kind {
                 PKind::Ember => 1.5,
                 PKind::Gas => 2.2,
+                PKind::Paper => 3.0,
                 _ => 0.6,
             };
             p.vel *= (1.0 - drag * dt).max(0.0);
+            if p.kind == PKind::Paper {
+                // Side-to-side flutter.
+                p.pos.x += (p.t * 7.0 + p.spin).sin() * 26.0 * dt;
+            }
             p.pos += p.vel * dt;
         }
         self.parts.retain(|p| p.t < p.life);
@@ -203,6 +211,13 @@ impl Fx {
                     with_alpha(p.color, fade),
                 ),
                 PKind::Gas => {}
+                PKind::Paper => {
+                    let a = p.spin + p.t * 5.0;
+                    let (d, n) = (vec2(a.cos(), a.sin()) * 2.6, vec2(-a.sin(), a.cos()) * 1.8 * (p.t * 9.0).sin().abs().max(0.3));
+                    let c = with_alpha(p.color, fade.min(1.0));
+                    draw_triangle(p.pos - d - n, p.pos + d - n, p.pos + d + n, c);
+                    draw_triangle(p.pos - d - n, p.pos + d + n, p.pos - d + n, c);
+                }
             }
         }
         for e in &self.list {

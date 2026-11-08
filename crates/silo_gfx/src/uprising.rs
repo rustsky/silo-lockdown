@@ -26,6 +26,17 @@ const SLOGANS: &[&str] = &[
 
 /// When the crowd starts heading for the stair (fraction of the rally).
 const LEAVE_AT: f32 = 0.78;
+/// When the ringleader shouts the slogan (fraction of the rally).
+const SHOUT_AT: f32 = 0.12;
+
+/// What the app should add on top of the rally this frame.
+#[derive(Default)]
+pub struct Cues {
+    /// Generator sparks.
+    pub sparks: Vec<Vec2>,
+    /// The slogan was just shouted: (ringleader's head, generator coils, slogan index).
+    pub shout: Option<(Vec2, Vec2, usize)>,
+}
 
 struct Member {
     kind: sc::EnemyKind,
@@ -85,22 +96,32 @@ impl Uprising {
         self.rally = None;
     }
 
-    /// Advance by `dt` game seconds. Returns points where the generator throws sparks.
-    pub fn update(&mut self, dt: f32) -> Vec<Vec2> {
-        let mut sparks = Vec::new();
-        let Some(r) = &mut self.rally else { return sparks };
+    /// Advance by `dt` game seconds.
+    pub fn update(&mut self, dt: f32) -> Cues {
+        let mut cues = Cues::default();
+        let Some(r) = &mut self.rally else { return cues };
+        let shout_t = SHOUT_AT * RALLY_TIME;
+        if r.t < shout_t && r.t + dt >= shout_t {
+            let h = hall();
+            let fl = h.y + h.h;
+            cues.shout = Some((
+                vec2(h.x + 26.0, fl - 11.0 - 30.0),
+                vec2(h.x + 50.0, fl - 24.0),
+                (r.wave as usize - 1) % SLOGANS.len(),
+            ));
+        }
         r.t += dt;
         self.spark_t -= dt;
         if self.spark_t <= 0.0 && r.t < RALLY_TIME * LEAVE_AT {
             self.spark_t = 0.35;
             let h = hall();
             let x = h.x + 46.0 + macroquad::rand::gen_range(0.0, 44.0);
-            sparks.push(vec2(x, h.y + h.h - 40.0));
+            cues.sparks.push(vec2(x, h.y + h.h - 40.0));
         }
         if r.t >= RALLY_TIME + 0.4 {
             self.rally = None;
         }
-        sparks
+        cues
     }
 
     /// The rally, drawn over the generator hall. Hidden if the cameras can't see down there.
@@ -112,6 +133,9 @@ impl Uprising {
         let h = hall();
         let fl = h.y + h.h;
         let k = r.t / RALLY_TIME;
+        // Seconds since the slogan was shouted (negative before).
+        let since = r.t - SHOUT_AT * RALLY_TIME;
+        let shock = if since >= 0.0 { (-since * 4.0).exp() } else { 0.0 };
 
         // Alarm: the hall pulses red, a beacon turns on the ceiling.
         let pulse = 0.5 + 0.5 * (time * 7.0).sin();
@@ -126,6 +150,38 @@ impl Uprising {
             let tip = bc + vec2(a.cos() * 60.0, 30.0 + a.sin().abs() * 20.0);
             let n = vec2(-(tip - bc).y, (tip - bc).x).normalize() * 10.0;
             draw_triangle(bc, tip + n, tip - n, Color::new(1.0, 0.1, 0.05, 0.12 * fade * a.cos().abs()));
+        }
+
+        // The shout: the hall flares red and the generator surges.
+        if shock > 0.01 {
+            draw_rectangle(h.x, h.y + 18.0, h.w, h.h - 18.0, Color::new(1.0, 0.15, 0.05, 0.35 * shock));
+            let body = Rect::new(h.x + 24.0, fl - 40.0, 54.0, 32.0);
+            for i in 0..5 {
+                let x = body.x + 8.0 + i as f32 * 9.0;
+                draw_rectangle(x - 1.0, body.y - 1.0, 6.0, body.h + 2.0, Color::new(1.0, 0.95, 0.8, 0.85 * shock));
+            }
+            let c = vec2(body.x + body.w / 2.0, body.y + body.h / 2.0);
+            for (rr, a) in [(50.0, 0.12), (32.0, 0.2), (18.0, 0.3)] {
+                draw_circle(c.x, c.y, rr * (1.0 + 0.3 * (1.0 - shock)), Color::new(1.0, 0.8, 0.5, a * shock));
+            }
+        }
+
+        // The slogan echoes up the stairwell.
+        if (0.0..2.2).contains(&since) && game.is_visible(sc::map::power_center()) {
+            let slogan = SLOGANS[(r.wave as usize - 1) % SLOGANS.len()];
+            for j in 0..3 {
+                let e = since - j as f32 * 0.28;
+                if !(0.0..1.6).contains(&e) {
+                    continue;
+                }
+                let size = 15.0 + e * 7.0;
+                let w = measure(slogan, size);
+                let cx = h.x + h.w + 70.0 + e * 20.0;
+                let y = h.y - 10.0 - e * 120.0;
+                let a = (1.0 - e / 1.6) * 0.55;
+                text(slogan, cx - w / 2.0 + 1.5, y + 1.5, size, Color::new(0.0, 0.0, 0.0, a * 0.8));
+                text(slogan, cx - w / 2.0, y, size, Color::new(1.0, 0.3, 0.2, a));
+            }
         }
 
         // The crowd faces the orator, fists in the air; then turns for the stair.
@@ -148,7 +204,9 @@ impl Uprising {
             let toward_stair = my_leave > 0.0 || gather < 1.0;
             render::rebel(&e, toward_stair, time);
             if !walking {
-                fist(vec2(x, fl - 4.0), time * 6.5 + m.phase, if toward_stair { 1.0 } else { -1.0 });
+                // Every fist shoots up together on the shout.
+                let phase = if (0.0..0.7).contains(&since) { PI / 2.0 } else { time * 6.5 + m.phase };
+                fist(vec2(x, fl - 4.0), phase, if toward_stair { 1.0 } else { -1.0 });
             }
         }
 
@@ -180,11 +238,14 @@ impl Uprising {
             // The shout.
             if o_leave == 0.0 && (0.12..LEAVE_AT + 0.05).contains(&k) {
                 let slogan = SLOGANS[(r.wave as usize - 1) % SLOGANS.len()];
-                let size = 14.0;
+                // The bubble punches in big with a jolt, then settles.
+                let pop = (-since.max(0.0) * 9.0).exp();
+                let size = 14.0 * (1.0 + 0.6 * pop);
+                let jolt = vec2((time * 71.0).sin(), (time * 53.0).cos()) * 2.5 * pop;
                 let w = measure(slogan, size) + 12.0;
-                let bx = (ox - 10.0).max(4.0);
-                let by = foot.y - 64.0;
-                draw_rectangle(bx, by - 15.0, w, 20.0, rgba(250, 244, 230, 235));
+                let bx = (ox - 10.0).max(4.0) + jolt.x;
+                let by = foot.y - 64.0 - 6.0 * pop + jolt.y;
+                draw_rectangle(bx, by - size - 1.0, w, size + 6.0, rgba(250, 244, 230, 235));
                 draw_triangle(
                     vec2(bx + 10.0, by + 5.0),
                     vec2(bx + 18.0, by + 5.0),

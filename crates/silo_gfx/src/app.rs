@@ -70,6 +70,8 @@ pub struct App {
     selected_enemy: Option<sc::Id>,
     /// Arrests in progress (Sims' agents marching rebels off).
     judicial: Judicial,
+    /// Seconds left of the crowd's chant: the music ducks under it meanwhile.
+    chant_left: f32,
     /// The rally at the generator hall that opens each wave.
     uprising: Uprising,
     /// Static placement rules per tile: [Deputy, Jammer, Gas, Marksman, Barrier][row][col]
@@ -138,6 +140,7 @@ impl App {
             selected_enemy: None,
             judicial: Judicial::default(),
             uprising: Uprising::default(),
+            chant_left: 0.0,
             sims_hinted: false,
             spots: Vec::new(),
             speed: 2,
@@ -331,8 +334,11 @@ impl App {
             _ if playing => (0.0, 1.0),
             _ => (0.0, 0.7), // title screen
         };
+        // The music ducks under the crowd's chant and swells back as it ends.
+        self.chant_left = (self.chant_left - dt).max(0.0);
+        let duck = if self.chant_left > 0.0 { 0.3 } else { 1.0 };
         if let Some(m) = &mut self.music {
-            m.update(dt, intensity, volume);
+            m.update(dt, intensity, volume, duck);
         }
     }
 
@@ -557,8 +563,38 @@ impl App {
             return;
         }
         let gdt = dt * self.speed as f32;
-        for p in self.uprising.update(gdt) {
+        let cues = self.uprising.update(gdt);
+        for p in cues.sparks {
             self.fx.burst(PKind::Spark, p, 7, 150.0, rgb(255, 210, 120));
+        }
+        if let Some((head, coils, slogan)) = cues.shout
+            && self.game.is_visible(sc::map::power_center())
+        {
+            // "WE WANT THE TRUTH!": a red shockwave, the generator surges, leaflets fly.
+            // Sound, silence and shake only in a real game, not the title screen's demo.
+            let playing = self.screen == Screen::Playing;
+            if playing {
+                self.fx.shake = self.fx.shake.max(0.3);
+            }
+            self.fx.add(head, 0.7, Kind::Ring { max_r: 110.0, color: rgb(255, 70, 40) });
+            self.fx.add(head, 1.0, Kind::Ring { max_r: 170.0, color: rgb(255, 140, 60) });
+            self.fx.burst(PKind::Spark, coils, 26, 260.0, rgb(255, 230, 150));
+            self.fx.burst(PKind::Ember, head, 18, 120.0, rgb(255, 90, 50));
+            for _ in 0..16 {
+                let v = vec2(rand::gen_range(-90.0, 140.0), rand::gen_range(-260.0, -140.0));
+                let shade_k = rand::gen_range(0.8, 1.0);
+                let col = Color::new(0.95 * shade_k, 0.93 * shade_k, 0.86 * shade_k, 1.0);
+                self.fx
+                    .particle(PKind::Paper, head + vec2(rand::gen_range(0.0, 60.0), 10.0), v, rand::gen_range(2.2, 3.4), col);
+            }
+            if playing {
+                // The chant for this wave's slogan.
+                if let Some(s) = &mut self.sfx {
+                    s.play_variant(Sfx::Roar, slogan, 1.0);
+                }
+                // Duck the music under the chant (the last word fades out by ~1.5 s).
+                self.chant_left = 1.5;
+            }
         }
         for d in self.judicial.update(gdt) {
             self.cleaning.send(self.game.map(), d, true);

@@ -2,7 +2,7 @@
 //! few variations of the frequent ones so repeated gunfire doesn't sound mechanical.
 //! Playback is rate-limited per sound and per frame, so 4x speed stays listenable.
 
-use crate::synth::{Lcg, SR, wav};
+use crate::synth::{Lcg, SR, wav, wav_at};
 use macroquad::audio::{PlaySoundParams, Sound, load_sound_from_bytes, play_sound};
 use std::f32::consts::TAU;
 
@@ -30,10 +30,14 @@ pub enum Sfx {
     Cleared,
     Equip,
     Click,
+    /// The crowd at the generator hall chanting the wave's slogan: one recording per slogan
+    /// (made by scripts/make-chant.py; every other sound is synthesised). Play the right one
+    /// with `play_variant`.
+    Roar,
 }
 
 impl Sfx {
-    pub const ALL: [Sfx; 22] = [
+    pub const ALL: [Sfx; 23] = [
         Sfx::Deputy,
         Sfx::Marksman,
         Sfx::Gas,
@@ -56,6 +60,7 @@ impl Sfx {
         Sfx::Cleared,
         Sfx::Equip,
         Sfx::Click,
+        Sfx::Roar,
     ];
 
     /// Minimum seconds between two plays of this sound, and its base volume.
@@ -72,6 +77,7 @@ impl Sfx {
             Sfx::BarrierHit => (0.12, 0.3),
             Sfx::Equip => (0.15, 0.35),
             Sfx::Click => (0.03, 0.3),
+            Sfx::Roar => (1.0, 1.0),
             _ => (0.3, 0.7),
         }
     }
@@ -79,9 +85,32 @@ impl Sfx {
     fn variants(self) -> u32 {
         match self {
             Sfx::Deputy | Sfx::RebelShot | Sfx::Kill | Sfx::BarrierHit | Sfx::Explosion => 3,
+            Sfx::Roar => CHANTS.len() as u32,
             _ => 1,
         }
     }
+}
+
+/// The crowd chants, one per slogan in `uprising::SLOGANS` order, recorded once from several
+/// text-to-speech voices (scripts/make-chant.py) and kept as small mono MP3s. The audio
+/// backend only decodes WAV on desktop, so they are decoded here at startup.
+const CHANTS: [&[u8]; 10] = [
+    include_bytes!("../assets/chant_0.mp3"),
+    include_bytes!("../assets/chant_1.mp3"),
+    include_bytes!("../assets/chant_2.mp3"),
+    include_bytes!("../assets/chant_3.mp3"),
+    include_bytes!("../assets/chant_4.mp3"),
+    include_bytes!("../assets/chant_5.mp3"),
+    include_bytes!("../assets/chant_6.mp3"),
+    include_bytes!("../assets/chant_7.mp3"),
+    include_bytes!("../assets/chant_8.mp3"),
+    include_bytes!("../assets/chant_9.mp3"),
+];
+
+/// Decode one of our mono MP3s: (samples, sample rate).
+fn decode_mp3(bytes: &[u8]) -> (Vec<f32>, u32) {
+    let d = nanomp3::decode_all::<f32>(bytes);
+    (d.samples, d.sample_rate)
 }
 
 /// A one-shot buffer.
@@ -418,6 +447,7 @@ fn synth(kind: Sfx, seed: u32) -> Vec<f32> {
             b.add(0.0, |t| (TAU * 1500.0 * t).sin() * (-t * 120.0).exp() * 0.6);
             b.finish()
         }
+        Sfx::Roar => decode_mp3(CHANTS[seed as usize - 1]).0,
     }
 }
 
@@ -435,11 +465,13 @@ impl SoundBank {
         for kind in Sfx::ALL {
             let mut vs = Vec::new();
             for seed in 1..=kind.variants() {
-                vs.push(
-                    load_sound_from_bytes(&wav(&synth(kind, seed), 0.9))
-                        .await
-                        .ok()?,
-                );
+                let bytes = if kind == Sfx::Roar {
+                    let (pcm, rate) = decode_mp3(CHANTS[seed as usize - 1]);
+                    wav_at(&pcm, 0.9, rate)
+                } else {
+                    wav(&synth(kind, seed), 0.9)
+                };
+                vs.push(load_sound_from_bytes(&bytes).await.ok()?);
             }
             sounds.push((kind, vs));
         }
@@ -455,6 +487,15 @@ impl SoundBank {
     /// Play `kind` at `volume` (0..1, scaled by the sound's own gain), unless it was just played
     /// or this frame is already busy.
     pub fn play(&mut self, kind: Sfx, volume: f32) {
+        self.play_inner(kind, None, volume);
+    }
+
+    /// Play a particular variant of `kind` (e.g. the chant for this wave's slogan).
+    pub fn play_variant(&mut self, kind: Sfx, variant: usize, volume: f32) {
+        self.play_inner(kind, Some(variant), volume);
+    }
+
+    fn play_inner(&mut self, kind: Sfx, variant: Option<usize>, volume: f32) {
         let now = macroquad::time::get_time();
         if now != self.frame_time {
             self.frame_time = now;
@@ -473,7 +514,7 @@ impl SoundBank {
         self.last[i] = now;
         self.played_this_frame += 1;
         let vs = &self.sounds[i].1;
-        let s = &vs[macroquad::rand::gen_range(0, vs.len())];
+        let s = &vs[variant.map_or_else(|| macroquad::rand::gen_range(0, vs.len()), |v| v % vs.len())];
         play_sound(
             s,
             PlaySoundParams {
@@ -493,8 +534,10 @@ mod tests {
         for kind in Sfx::ALL {
             for seed in 1..=kind.variants() {
                 let b = synth(kind, seed);
+                // The recorded chant runs a little longer than the synthesised effects.
+                let max_secs = if kind == Sfx::Roar { 3 } else { 2 };
                 assert!(
-                    !b.is_empty() && b.len() <= 2 * SR as usize,
+                    !b.is_empty() && b.len() <= max_secs * SR as usize,
                     "{kind:?} length"
                 );
                 assert!(b.iter().all(|x| x.is_finite()), "{kind:?} not finite");

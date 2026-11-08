@@ -237,6 +237,8 @@ pub struct Music {
     mix: f32,
     pub muted: bool,
     level: f32,
+    /// Ducking gain (1 = full) that dips the music under a voice-over such as the chant.
+    duck: f32,
 }
 
 impl Music {
@@ -264,17 +266,23 @@ impl Music {
             mix: 0.0,
             muted: false,
             level: 0.0,
+            duck: 1.0,
         })
     }
 
-    /// Steer the crossfade (`intensity` 0..1) and overall level (`volume` 0..1).
-    pub fn update(&mut self, dt: f32, intensity: f32, volume: f32) {
+    /// Steer the crossfade (`intensity` 0..1), overall level (`volume` 0..1) and ducking
+    /// (`duck`: target gain while something should sit on top of the music, 1 = none).
+    /// Ducking follows like a compressor's sidechain: quick to dip, slow to recover.
+    pub fn update(&mut self, dt: f32, intensity: f32, volume: f32, duck: f32) {
         self.mix += (intensity - self.mix) * (1.0 - (-dt * 0.8).exp());
         let target = if self.muted { 0.0 } else { volume };
         self.level += (target - self.level) * (1.0 - (-dt * 2.0).exp());
+        let rate = if duck < self.duck { 14.0 } else { 1.6 };
+        self.duck += (duck - self.duck) * (1.0 - (-dt * rate).exp());
         let m = self.mix.clamp(0.0, 1.0);
-        set_sound_volume(&self.shift, self.level * (1.0 - m) * 0.8);
-        set_sound_volume(&self.uprising, self.level * m * 0.95);
+        let g = self.level * self.duck;
+        set_sound_volume(&self.shift, g * (1.0 - m) * 0.8);
+        set_sound_volume(&self.uprising, g * m * 0.95);
     }
 }
 

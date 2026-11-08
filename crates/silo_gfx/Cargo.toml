@@ -6,6 +6,7 @@ edition.workspace = true
 
 [dependencies]
 macroquad = { version = "0.4", features = ["audio"] }
+nanomp3 = { version = "0.2.0", default-features = false, features = ["alloc"] }
 silo_core = { path = "../silo_core" }
 
 # Android build via cargo-quad-apk (see README).
