@@ -36,6 +36,12 @@ pub fn barrier_upgrade_cost(level: u8) -> Option<u32> {
     }
 }
 
+/// Seals the silo gets back when someone is sent to cleaning (every arrested rebel, and a
+/// leader brought down by IT): the outside is watched again, the airlock re-sealed a little.
+pub fn cleaning_seals(kind: EnemyKind) -> u32 {
+    if kind == EnemyKind::Leader { 2 } else { 1 }
+}
+
 /// Judicial (Sims' agents) will arrest a rebel on the stair for a fee that rises with the war.
 /// A flag-carrying leader costs three times as much; they are sent to cleaning.
 pub fn arrest_cost(kind: EnemyKind, wave: u32) -> u32 {

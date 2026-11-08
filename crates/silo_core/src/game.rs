@@ -273,8 +273,11 @@ pub enum Event {
     BarrierUpgraded { id: Id, level: u8 },
     /// End of wave: IT rebuilt `rebuilt` wrecked barriers and patched the damaged ones.
     BarriersRepaired { rebuilt: u32 },
-    /// Judicial arrested a rebel. A leader is sent to cleaning.
+    /// Judicial arrested a rebel (who is sent to cleaning).
     Arrested { id: Id, kind: EnemyKind, pos: Vec2, dist: f32, cost: u32 },
+    /// Someone was sent to cleaning (an arrested rebel, or a leader IT brought down):
+    /// `seals` were restored (0 if the silo already had all of them).
+    SentToCleaning { kind: EnemyKind, seals: u32 },
     /// IT's server room fell: cameras below Up Top are dark for `seconds`.
     ItCollapsed { seconds: f32 },
     ItRestored,
@@ -301,6 +304,8 @@ pub struct Totals {
     pub barriers_broken: u32,
     /// Rebels arrested by Judicial.
     pub arrests: u32,
+    /// Seals won back by sending people to cleaning.
+    pub seals_restored: u32,
     /// Rebels Supply handed guns / tools to.
     pub armed: u32,
     pub tooled: u32,
@@ -634,6 +639,7 @@ impl Game {
         let e = self.enemies.remove(idx);
         self.totals.arrests += 1;
         self.emit(Event::Arrested { id: e.id, kind: e.kind, pos: e.pos, dist: e.dist, cost });
+        self.send_to_cleaning(e.kind);
         Ok(cost)
     }
 
@@ -1039,6 +1045,10 @@ impl Game {
                 dist: e.dist,
                 bounty: e.bounty,
             });
+            // A fallen leader is sent to cleaning.
+            if e.kind == EnemyKind::Leader {
+                self.send_to_cleaning(e.kind);
+            }
         }
     }
 
@@ -1084,6 +1094,17 @@ impl Game {
     }
 
     // ------------------------------------------------------------ helpers
+
+    /// Someone goes out to clean: win back a few seals (never more than the silo started with).
+    fn send_to_cleaning(&mut self, kind: EnemyKind) {
+        if self.phase == Phase::Lost {
+            return; // too late: the airlock is already open
+        }
+        let seals = cleaning_seals(kind).min(START_SEALS - self.seals);
+        self.seals += seals;
+        self.totals.seals_restored += seals;
+        self.emit(Event::SentToCleaning { kind, seals });
+    }
 
     fn check_live(&self) -> Result<(), CommandError> {
         if self.is_over() { Err(CommandError::GameOver) } else { Ok(()) }

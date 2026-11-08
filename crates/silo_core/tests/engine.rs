@@ -710,6 +710,52 @@ fn arrest_removes_rebel_for_a_fee() {
 }
 
 #[test]
+fn cleaning_wins_back_seals_up_to_the_start() {
+    assert_eq!(cleaning_seals(EnemyKind::Mechanic), 1);
+    assert_eq!(cleaning_seals(EnemyKind::Leader), 2);
+    // Undefended: let wave 1 cost some seals.
+    let mut g = Game::new(0);
+    g.send_wave().unwrap();
+    g.run_wave(WAVE_CAP);
+    let lost = START_SEALS - g.seals();
+    assert!(lost >= 2, "wave 1 should breach");
+    // Arrest rebels in wave 2: each one sent to cleaning gives a seal back.
+    g.send_wave().unwrap();
+    let mut arrested = 0;
+    while g.phase() == Phase::Wave && arrested < 2 {
+        step_checked(&mut g);
+        if let Some(id) = g.enemies().first().map(|e| e.id) {
+            let before = g.seals();
+            if g.arrest(id).is_ok() {
+                arrested += 1;
+                assert_eq!(g.seals(), (before + 1).min(START_SEALS));
+                assert!(
+                    g.drain_events().iter().any(|e| matches!(e, Event::SentToCleaning { seals: 1, .. })),
+                    "no SentToCleaning event"
+                );
+            }
+        }
+    }
+    assert_eq!(arrested, 2);
+    assert_eq!(g.totals().seals_restored, 2);
+    g.validate().unwrap();
+}
+
+#[test]
+fn cleaning_never_goes_above_the_starting_seals() {
+    let mut g = Game::new(0);
+    g.send_wave().unwrap();
+    while g.enemies().is_empty() {
+        step_checked(&mut g);
+    }
+    let id = g.enemies()[0].id;
+    g.arrest(id).unwrap();
+    assert_eq!(g.seals(), START_SEALS, "already full");
+    assert!(g.drain_events().iter().any(|e| matches!(e, Event::SentToCleaning { seals: 0, .. })));
+    g.validate().unwrap();
+}
+
+#[test]
 fn leaders_cost_three_times_and_broke_players_cannot_arrest() {
     for w in [1, 10, 20] {
         assert_eq!(arrest_cost(EnemyKind::Leader, w), 3 * arrest_cost(EnemyKind::Mechanic, w));

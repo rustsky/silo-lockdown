@@ -318,6 +318,11 @@ impl App {
             }
             Event::BarriersRepaired { .. } => {}
             Event::Arrested { pos, .. } => self.sound(Sfx::Equip, Some(*pos)),
+            Event::SentToCleaning { seals, .. } => {
+                if *seals > 0 {
+                    self.sound(Sfx::ItUp, None);
+                }
+            }
             Event::TowerDestroyed { pos, .. } => self.sound(Sfx::TowerDestroyed, Some(*pos)),
             Event::ItCollapsed { .. } => self.sound(Sfx::ItDown, None),
             Event::ItRestored => self.sound(Sfx::ItUp, Some(it_center())),
@@ -875,7 +880,7 @@ impl App {
                     if playing {
                         self.banner = Some((
                             "SENT TO CLEANING".into(),
-                            "The leader is suited up and marched to the airlock.".into(),
+                            "The leader is suited up and marched to the airlock. +2 seals.".into(),
                             3.0,
                         ));
                     }
@@ -1017,6 +1022,22 @@ impl App {
                         text: label.into(),
                         color: rgb(240, 150, 80),
                     },
+                );
+            }
+            Event::SentToCleaning { seals, .. } if seals > 0 => {
+                // The airlock re-seals a little: a green "+N SEAL" over it.
+                self.fx.add(
+                    airlock + vec2(0.0, 52.0),
+                    1.6,
+                    Kind::Text {
+                        text: format!("+{seals} SEAL{}", if seals == 1 { "" } else { "S" }),
+                        color: rgb(120, 240, 140),
+                    },
+                );
+                self.fx.add(
+                    airlock + vec2(0.0, 20.0),
+                    0.6,
+                    Kind::Ring { max_r: 46.0, color: rgb(120, 240, 140) },
                 );
             }
             Event::Arrested {
@@ -2032,11 +2053,11 @@ impl App {
             }
             text(&tags.join("   "), 88.0, y + 66.0, 16.0, rgb(200, 200, 200));
             let info = if leader {
-                "Carries the flag. Sims' agents take them alive at three times the price, \
-                 and march them to cleaning."
+                "Carries the flag. Sims' agents take them alive at three times the price \
+                 and march them to cleaning: +2 seals."
             } else {
                 "Pay Judicial: one of Sims' agents arrests them on the stair and marches \
-                 them to cleaning. No bounty for arrests."
+                 them to cleaning: +1 seal. No bounty for arrests."
             };
             for (i, l) in wrap(info, 15.0, 330.0).iter().enumerate() {
                 text(l, 20.0, y + 112.0 + i as f32 * 20.0, 15.0, rgb(170, 170, 176));

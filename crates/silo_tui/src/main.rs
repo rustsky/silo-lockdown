@@ -200,6 +200,9 @@ impl App {
                 self.say(Line::from("A barrier was smashed!").yellow());
             }
             Event::ItRestored => self.say(Line::from("IT back online. Cameras restored.").cyan()),
+            Event::SentToCleaning { seals, .. } if seals > 0 => {
+                self.say(Line::from(format!("Sent to cleaning: +{seals} seal(s).")).green())
+            }
             Event::PowerCut { first, seconds, .. } => {
                 let name = SECTIONS[section_of_row(first)].0;
                 self.say(Line::from(format!("Main power cut: {name} is dark for {seconds:.0}s.")).yellow());
