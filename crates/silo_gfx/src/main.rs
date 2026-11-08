@@ -20,10 +20,19 @@ use macroquad::experimental::coroutines::start_coroutine;
 use macroquad::prelude::*;
 
 fn window_conf() -> Conf {
+    // SILO_SHOT_WINDOW=W,H: another window size for screenshots (the game scales to fit).
+    let size: Vec<i32> = std::env::var("SILO_SHOT_WINDOW")
+        .ok()
+        .map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+        .unwrap_or_default();
+    let (width, height) = match size[..] {
+        [w, h] => (w, h),
+        _ => (588, 854),
+    };
     Conf {
         window_title: "Silo: Lockdown".to_owned(),
-        window_width: 588,
-        window_height: 854,
+        window_width: width,
+        window_height: height,
         high_dpi: true,
         window_resizable: true,
         sample_count: 4,

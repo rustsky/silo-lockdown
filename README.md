@@ -8,8 +8,8 @@ if the airlock seals fail, the silo is opened.
 HTML from [Releases](https://github.com/rustsky/silo-lockdown/releases) and open it, no install.
 
 <p align="center">
+  <img src="docs/cover.png" width="586" alt="Silo: Lockdown, tower defense in an underground silo">
   <img src="docs/gameplay.gif" width="320" alt="Wave 13 in the Down Deep: rebels climb the spiral stair through gas clouds">
-  <img src="docs/silo-one-calls.png" width="320" alt="Victory: Silo 1 calls Silo 12 on a secure line">
 </p>
 
 ## Layout
@@ -129,5 +129,7 @@ SILO_SHOT=shot.png SILO_SHOT_FRAME=900 cargo run --release -p silo_gfx   # autop
 #   SILO_SHOT_VIEW=0|1|2 picks the section, SILO_SHOT_SKIP=N lets the AI play N waves first,
 #   SILO_SHOT_BARRIERS=1 builds a few barriers in Mids, SILO_SHOT_NOAI=1 leaves the silo undefended,
 #   SILO_SHOT_SEQ=COUNT,EVERY saves COUNT frames (shot_000.png...) for animations like docs/gameplay.gif
+#   SILO_SHOT_WINDOW=W,H and SILO_SHOT_ZOOM=Z,X,Y render big and zoomed in (sharp, like docs/cover.png),
+#   SILO_SHOT_CLEAN=D,D@F,... sends cleaners from D tiles below the airlock (at frame F with @F)
 python3 scripts/make-icon.py                          # redraw the app icons (needs rsvg-convert)
 ```

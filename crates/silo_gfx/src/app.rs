@@ -230,7 +230,8 @@ impl App {
             if let Some(n) = std::env::var("SILO_SHOT_SAFEGUARD").ok().and_then(|v| v.parse().ok()) {
                 app.safeguard.start(n);
             }
-            // SILO_SHOT_CLEAN=D[,D..]: send cleaners from D tiles short of the airlock.
+            // SILO_SHOT_CLEAN=D[,D..]: send cleaners from D tiles short of the airlock;
+            // D@F sends that one at frame F instead (see `frame`).
             if let Ok(v) = std::env::var("SILO_SHOT_CLEAN") {
                 let len = app.game.map().length();
                 for d in v.split(',').filter_map(|d| d.parse::<f32>().ok()) {
@@ -419,6 +420,19 @@ impl App {
                 self.game.debug_power_cut(s as usize, 20.0);
             }
         }
+        // SILO_SHOT_CLEAN entries D@F: send a cleaner from D tiles short of the airlock at frame F.
+        if self.shot.is_some()
+            && let Ok(v) = std::env::var("SILO_SHOT_CLEAN")
+        {
+            let len = self.game.map().length();
+            for (d, f) in v.split(',').filter_map(|e| e.split_once('@')) {
+                if let (Ok(d), Ok(f)) = (d.parse::<f32>(), f.parse::<u32>())
+                    && f == self.frame
+                {
+                    self.cleaning.send(self.game.map(), (len - d).max(0.0), true);
+                }
+            }
+        }
         // SILO_SHOT_ARREST=N: at frame N pick the rebel nearest the middle of the view, and
         // arrest them 20 frames later (unless SILO_SHOT_ARREST_HOLD is set: panel shot).
         if self.shot.is_some()
@@ -445,7 +459,17 @@ impl App {
 
         // Letterboxed logical canvas of W x H.
         let (sw, sh) = (screen_width(), screen_height());
-        let scale = (sw / W).min(sh / H);
+        // SILO_SHOT_ZOOM=Z,X,Y: screenshot runs zoom Z times into world point (X, Y).
+        let (zoom, focus) = self
+            .shot
+            .as_ref()
+            .and_then(|_| std::env::var("SILO_SHOT_ZOOM").ok())
+            .and_then(|v| {
+                let n: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                (n.len() == 3).then(|| (n[0].max(0.1), vec2(n[1], n[2])))
+            })
+            .unwrap_or((1.0, vec2(W / 2.0, H / 2.0)));
+        let scale = (sw / W).min(sh / H) * zoom;
         set_scale(scale);
         prewarm_fonts();
         let (vw, vh) = (sw / scale, sh / scale);
@@ -457,7 +481,7 @@ impl App {
         // Note: for on-screen cameras macroquad 0.4 already flips Y internally, so a positive
         // y zoom gives a y-down world (from_display_rect would render upside down here).
         let cam = Camera2D {
-            target: vec2(W / 2.0, H / 2.0) + shake,
+            target: focus + shake,
             zoom: vec2(2.0 / vw, 2.0 / vh),
             ..Default::default()
         };
