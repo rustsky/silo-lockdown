@@ -1,0 +1,44 @@
+# On a version tag (v0.1.0, ...): build the standalone single-file HTML game and publish it as a
+# GitHub Release, so players can download one file and play offline by double-clicking it.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain (with the WebAssembly target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Native libraries for the desktop build's tests (audio, X11, OpenGL)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libx11-dev libxi-dev libgl1-mesa-dev
+
+      - name: Tests
+        run: cargo test --workspace --release
+
+      - name: Build the single-file HTML game
+        run: |
+          ./scripts/build-single-html.sh
+          mv dist/silo-lockdown.html "dist/silo-lockdown-${GITHUB_REF_NAME}.html"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "dist/silo-lockdown-${GITHUB_REF_NAME}.html" \
+            --repo "$GITHUB_REPOSITORY" --title "Silo: Lockdown ${GITHUB_REF_NAME}" \
+            --notes "Play in the browser: https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/
+
+          Or download **silo-lockdown-${GITHUB_REF_NAME}.html** below and open it: the whole game in one file, no install, works offline."

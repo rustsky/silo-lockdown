@@ -14,7 +14,12 @@ b64 = base64.b64encode(wasm).decode()
 gl = (web / "gl.js").read_text()
 audio = (web / "audio.js").read_text()
 unlock = (web / "audio-unlock.js").read_text()
-stats = (web / "stats.js").read_text()
+# No player stats in the standalone file: only the published site counts players. The game still
+# imports the two stats functions, so answer "unknown" (-1), which hides the panels.
+stats = ('miniquad_add_plugin({ register_plugin: function (o) {'
+         ' o.env.silo_stats_online = function () { return -1; };'
+         ' o.env.silo_stats_players = function () { return -1; }; },'
+         ' name: "silo_stats", version: 1 });')
 html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>

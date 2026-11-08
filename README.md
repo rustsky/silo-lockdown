@@ -4,6 +4,14 @@ A tower defense game set in an underground silo. You are IT. The uprising climbs
 stair from Mechanical toward the airlock. Build security on the living levels and catwalks;
 if the airlock seals fail, the silo is opened.
 
+**Play it in the browser: https://rustsky.github.io/silo-lockdown/**, or download the single-file
+HTML from [Releases](https://github.com/rustsky/silo-lockdown/releases) and open it, no install.
+
+<p align="center">
+  <img src="docs/gameplay.gif" width="320" alt="Wave 13 in the Down Deep: rebels climb the spiral stair through gas clouds">
+  <img src="docs/silo-one-calls.png" width="320" alt="Victory: Silo 1 calls Silo 12 on a secure line">
+</p>
+
 ## Layout
 
 | crate | what |
@@ -88,6 +96,10 @@ push to `main`/`master`. One-time setup on GitHub: **Settings → Pages → Sour
 The game is then at `https://<user>.github.io/<repo>/`, playable in any browser and installable
 from Safari/Chrome ("Add to Home Screen") to run offline.
 
+**Releases.** Pushing a version tag (`git tag v0.1.0 && git push origin v0.1.0`) runs
+`.github/workflows/release.yml`: it tests, builds the single-file HTML and publishes it as a GitHub
+Release.
+
 **Player counts.** The title screen of the published web version shows how many people are
 playing right now and how many have played so far (`web/stats.js`). It uses two public counters
 on [abacus](https://abacus.jasoncameron.dev) (free, no account): one goes up once per device, the
@@ -115,5 +127,7 @@ cargo run --release -p silo_core --example trace      # wave-by-wave bot game
 cargo run -p silo_core --example map_dump             # tile layout
 SILO_SHOT=shot.png SILO_SHOT_FRAME=900 cargo run --release -p silo_gfx   # autoplay screenshot
 #   SILO_SHOT_VIEW=0|1|2 picks the section, SILO_SHOT_SKIP=N lets the AI play N waves first,
-#   SILO_SHOT_BARRIERS=1 builds a few barriers in Mids, SILO_SHOT_NOAI=1 leaves the silo undefended
+#   SILO_SHOT_BARRIERS=1 builds a few barriers in Mids, SILO_SHOT_NOAI=1 leaves the silo undefended,
+#   SILO_SHOT_SEQ=COUNT,EVERY saves COUNT frames (shot_000.png...) for animations like docs/gameplay.gif
+python3 scripts/make-icon.py                          # redraw the app icons (needs rsvg-convert)
 ```

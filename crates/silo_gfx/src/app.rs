@@ -597,13 +597,35 @@ impl App {
             && self.frame >= *at
         {
             {
+                // SILO_SHOT_SEQ=COUNT,EVERY: save COUNT frames, one every EVERY frames, as
+                // path_000.png, path_001.png... (for animations); otherwise just the one.
+                let seq: Vec<u32> = std::env::var("SILO_SHOT_SEQ")
+                    .ok()
+                    .map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect())
+                    .unwrap_or_default();
+                let (count, every) = match seq[..] {
+                    [c, e] => (c.max(1), e.max(1)),
+                    _ => (1, 1),
+                };
+                let k = self.frame - *at;
+                if !k.is_multiple_of(every) {
+                    return;
+                }
+                let out = if count > 1 {
+                    let stem = path.strip_suffix(".png").unwrap_or(path);
+                    format!("{stem}_{:03}.png", k / every)
+                } else {
+                    path.clone()
+                };
                 // Saved exactly as read back (no flip), so it matches what the window shows.
                 let mut img = get_screen_data();
                 for px in img.bytes.as_chunks_mut::<4>().0 {
                     px[3] = 255;
                 }
-                img.export_png(path);
-                self.quit = true;
+                img.export_png(&out);
+                if k / every + 1 >= count {
+                    self.quit = true;
+                }
             }
         }
     }
