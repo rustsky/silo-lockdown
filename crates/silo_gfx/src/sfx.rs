@@ -34,10 +34,19 @@ pub enum Sfx {
     /// (made by scripts/make-chant.py; every other sound is synthesised). Play the right one
     /// with `play_variant`.
     Roar,
+    /// Spoken lines of the defeat sequence: Silo 1's announcements and the escaping crowd
+    /// (recordings, scripts/make-voices.py). Play one with `play_variant` and a `VOICE_*`.
+    Voice,
 }
 
+/// `Sfx::Voice` variants.
+pub const VOICE_BREACH: usize = 0;
+pub const VOICE_GAS: usize = 1;
+pub const VOICE_GAME_OVER: usize = 2;
+pub const VOICE_WE_ARE_FREE: usize = 3;
+
 impl Sfx {
-    pub const ALL: [Sfx; 23] = [
+    pub const ALL: [Sfx; 24] = [
         Sfx::Deputy,
         Sfx::Marksman,
         Sfx::Gas,
@@ -61,6 +70,7 @@ impl Sfx {
         Sfx::Equip,
         Sfx::Click,
         Sfx::Roar,
+        Sfx::Voice,
     ];
 
     /// Minimum seconds between two plays of this sound, and its base volume.
@@ -78,6 +88,7 @@ impl Sfx {
             Sfx::Equip => (0.15, 0.35),
             Sfx::Click => (0.03, 0.3),
             Sfx::Roar => (1.0, 1.0),
+            Sfx::Voice => (0.2, 1.0),
             _ => (0.3, 0.7),
         }
     }
@@ -86,6 +97,7 @@ impl Sfx {
         match self {
             Sfx::Deputy | Sfx::RebelShot | Sfx::Kill | Sfx::BarrierHit | Sfx::Explosion => 3,
             Sfx::Roar => CHANTS.len() as u32,
+            Sfx::Voice => VOICES.len() as u32,
             _ => 1,
         }
     }
@@ -105,6 +117,14 @@ const CHANTS: [&[u8]; 10] = [
     include_bytes!("../assets/chant_7.mp3"),
     include_bytes!("../assets/chant_8.mp3"),
     include_bytes!("../assets/chant_9.mp3"),
+];
+
+/// The defeat sequence's spoken lines, in `VOICE_*` order (scripts/make-voices.py).
+const VOICES: [&[u8]; 4] = [
+    include_bytes!("../assets/voice_0.mp3"),
+    include_bytes!("../assets/voice_1.mp3"),
+    include_bytes!("../assets/voice_2.mp3"),
+    include_bytes!("../assets/voice_3.mp3"),
 ];
 
 /// Decode one of our mono MP3s: (samples, sample rate).
@@ -448,6 +468,7 @@ fn synth(kind: Sfx, seed: u32) -> Vec<f32> {
             b.finish()
         }
         Sfx::Roar => decode_mp3(CHANTS[seed as usize - 1]).0,
+        Sfx::Voice => decode_mp3(VOICES[seed as usize - 1]).0,
     }
 }
 
@@ -465,8 +486,13 @@ impl SoundBank {
         for kind in Sfx::ALL {
             let mut vs = Vec::new();
             for seed in 1..=kind.variants() {
-                let bytes = if kind == Sfx::Roar {
-                    let (pcm, rate) = decode_mp3(CHANTS[seed as usize - 1]);
+                let recording = match kind {
+                    Sfx::Roar => Some(CHANTS[seed as usize - 1]),
+                    Sfx::Voice => Some(VOICES[seed as usize - 1]),
+                    _ => None,
+                };
+                let bytes = if let Some(mp3) = recording {
+                    let (pcm, rate) = decode_mp3(mp3);
                     wav_at(&pcm, 0.9, rate)
                 } else {
                     wav(&synth(kind, seed), 0.9)
@@ -534,8 +560,12 @@ mod tests {
         for kind in Sfx::ALL {
             for seed in 1..=kind.variants() {
                 let b = synth(kind, seed);
-                // The recorded chant runs a little longer than the synthesised effects.
-                let max_secs = if kind == Sfx::Roar { 3 } else { 2 };
+                // Recordings run longer than the synthesised effects.
+                let max_secs = match kind {
+                    Sfx::Roar => 3,
+                    Sfx::Voice => 9,
+                    _ => 2,
+                };
                 assert!(
                     !b.is_empty() && b.len() <= max_secs * SR as usize,
                     "{kind:?} length"

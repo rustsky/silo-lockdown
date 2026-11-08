@@ -8,6 +8,7 @@ mod judicial;
 mod light;
 mod music;
 mod render;
+mod safeguard;
 mod sfx;
 mod synth;
 mod ui;

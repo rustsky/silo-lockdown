@@ -3,6 +3,7 @@
 use crate::cleaning::Cleaning;
 use crate::fx::{Fx, Kind, PKind};
 use crate::judicial::Judicial;
+use crate::safeguard::Safeguard;
 use crate::uprising::Uprising;
 use crate::light::Lighting;
 use crate::music::Music;
@@ -72,6 +73,8 @@ pub struct App {
     judicial: Judicial,
     /// Seconds left of the crowd's chant: the music ducks under it meanwhile.
     chant_left: f32,
+    /// Defeat cinematic: escape, drones, gas (Silo 1's Safeguard protocol).
+    safeguard: Safeguard,
     /// The rally at the generator hall that opens each wave.
     uprising: Uprising,
     /// Static placement rules per tile: [Deputy, Jammer, Gas, Marksman, Barrier][row][col]
@@ -140,6 +143,7 @@ impl App {
             selected_enemy: None,
             judicial: Judicial::default(),
             uprising: Uprising::default(),
+            safeguard: Safeguard::default(),
             chant_left: 0.0,
             sims_hinted: false,
             spots: Vec::new(),
@@ -212,6 +216,10 @@ impl App {
                         app.field_tap(px(sc::map::tile_center(c, r)));
                     }
                 }
+            }
+            // SILO_SHOT_SAFEGUARD=N: play the defeat sequence with N rebels breaking out.
+            if let Some(n) = std::env::var("SILO_SHOT_SAFEGUARD").ok().and_then(|v| v.parse().ok()) {
+                app.safeguard.start(n);
             }
             // SILO_SHOT_CLEAN=D[,D..]: send cleaners from D tiles short of the airlock.
             if let Ok(v) = std::env::var("SILO_SHOT_CLEAN") {
@@ -336,7 +344,7 @@ impl App {
         };
         // The music ducks under the crowd's chant and swells back as it ends.
         self.chant_left = (self.chant_left - dt).max(0.0);
-        let duck = if self.chant_left > 0.0 { 0.3 } else { 1.0 };
+        let duck = if self.chant_left > 0.0 || self.safeguard.active() { 0.3 } else { 1.0 };
         if let Some(m) = &mut self.music {
             m.update(dt, intensity, volume, duck);
         }
@@ -357,6 +365,7 @@ impl App {
         self.selected_enemy = None;
         self.judicial.clear();
         self.uprising.clear();
+        self.safeguard.clear();
         self.sims_hinted = false;
         self.speed = 1;
         self.paused = false;
@@ -437,6 +446,7 @@ impl App {
         }
         self.simulate(dt);
         self.fx.update(dt);
+        self.update_safeguard(dt);
         self.update_gas_and_cleaning(dt);
         self.update_scroll(dt);
         self.update_music(dt);
@@ -492,11 +502,13 @@ impl App {
         set_camera(&world_cam);
         self.cleaning.draw_sensor(self.time);
         self.fx.draw();
+        self.safeguard.draw_surface(self.time);
         self.uprising.draw(&self.game, self.time);
         self.judicial.draw(&self.game, self.time);
         self.cleaning.draw(&self.game, self.time);
         self.field_overlays(&ui, world_pointer);
         render::darkness(&self.game, self.time);
+        self.safeguard.draw_gas(self.time);
         set_camera(&cam);
         // The world is taller than the field: cover what spills over the HUD and panel.
         draw_rectangle(0.0, -vh, W, vh + HUD_H, rgb(8, 8, 10));
@@ -514,6 +526,8 @@ impl App {
         }
         self.draw_banner();
         self.fx.draw_toast(W / 2.0, PANEL_Y - 24.0);
+        // The end card covers everything in the field.
+        self.safeguard.draw_card();
 
         match self.screen {
             Screen::Title => self.title(&mut ui),
@@ -521,7 +535,12 @@ impl App {
                 self.hud(&mut ui);
                 self.panel(&mut ui);
                 self.navigator(&mut ui);
-                if self.game.is_over() {
+                if self.safeguard.active() {
+                    // A tap on the field skips the Safeguard sequence.
+                    if ui.hit(Rect::new(0.0, HUD_H, W, FIELD_H)) {
+                        self.safeguard.skip();
+                    }
+                } else if self.game.is_over() {
                     self.game_over(&mut ui);
                 }
                 self.field_input(&mut ui);
@@ -555,6 +574,57 @@ impl App {
     }
 
     // ------------------------------------------------------------ simulation
+
+    /// Advance the defeat cinematic and turn its cues into effects and sounds.
+    fn update_safeguard(&mut self, dt: f32) {
+        if self.screen == Screen::Playing
+            && self.safeguard.active()
+            && (is_key_pressed(KeyCode::Space) || is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::Escape))
+        {
+            self.safeguard.skip();
+        }
+        let cues = self.safeguard.update(dt);
+        let voice = |app: &mut Self, v: usize| {
+            if app.screen == Screen::Playing
+                && let Some(s) = &mut app.sfx
+            {
+                s.play_variant(Sfx::Voice, v, 1.0);
+            }
+        };
+        if cues.freed {
+            voice(self, crate::sfx::VOICE_WE_ARE_FREE);
+        }
+        if cues.game_over {
+            voice(self, crate::sfx::VOICE_GAME_OVER);
+        }
+        if cues.alarm {
+            voice(self, crate::sfx::VOICE_BREACH);
+            self.banner = Some((
+                "SAFEGUARD".into(),
+                "Silo 1 has initiated the Safeguard protocol.".into(),
+                3.5,
+            ));
+            self.fx.red_flash = 0.6;
+            self.sound(Sfx::PowerCut, None);
+            self.sound(Sfx::Horn, None);
+        }
+        for (from, to) in cues.shots {
+            self.fx.add(from, 0.18, Kind::Tracer { to });
+            self.fx.burst(PKind::Debris, to, 8, 90.0, rgb(120, 104, 84));
+            self.fx.shake = self.fx.shake.max(0.12);
+            self.sound(Sfx::Marksman, None);
+        }
+        if cues.gas_start {
+            voice(self, crate::sfx::VOICE_GAS);
+            self.sound(Sfx::ItDown, None);
+            self.sound(Sfx::Gas, None);
+        }
+        for p in cues.puffs {
+            let v = vec2(rand::gen_range(-40.0, 40.0), rand::gen_range(10.0, 50.0));
+            let col = Color::new(0.62, 0.7, 0.22, 0.7);
+            self.fx.gas(p, v, rand::gen_range(1.2, 2.0), rand::gen_range(10.0, 18.0), col);
+        }
+    }
 
     /// Gas trails behind canisters in flight, gas launchers venting while idle, and the
     /// cleaners' walk (both run on game time, so they freeze when paused).
@@ -1005,7 +1075,14 @@ impl App {
                     },
                 );
             }
-            Event::Lost => self.fx.shake = 0.8,
+            Event::Lost => {
+                self.fx.shake = 0.8;
+                if playing {
+                    // The rebels pour out, and Silo 1 answers.
+                    let n = (self.game.enemies().len() + 4).clamp(6, 10);
+                    self.safeguard.start(n);
+                }
+            }
             _ => {}
         }
     }
@@ -1217,6 +1294,11 @@ impl App {
 
     fn update_scroll(&mut self, dt: f32) {
         self.view_label = (self.view_label - dt).max(0.0);
+        // The Safeguard sequence drives the camera.
+        if let Some(s) = self.safeguard.camera(max_scroll()) {
+            self.scroll = s;
+            return;
+        }
         if self.screen == Screen::Title {
             // Attract mode: drift slowly down the silo and back up.
             self.scroll = (1.0 - (self.time * 0.12).cos()) / 2.0 * max_scroll();
@@ -2237,8 +2319,8 @@ impl App {
             )
         } else {
             (
-                "THE AIRLOCK IS OPEN",
-                "The rebels step outside. IT has failed the silo.",
+                "GAME OVER",
+                "You failed to prevent the Safeguard: the uprising broke out, and Silo 1 sealed the silo.",
             )
         };
         text_shadow(
